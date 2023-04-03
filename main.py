@@ -59,13 +59,13 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     canvas_h_at_least = int(max(a.cy, a.h - a.cy) + 3) * 2 * upscale
     assert upscale > 0 and upscale % 1 == 0, "仅支持整数倍放大!"
     assert canvas_w >= canvas_w_at_least and canvas_h >= canvas_h_at_least, "提供的画布尺寸太小!"
-    # 在超采样前, 先在周围围一圈白色
-    padded_a = np.pad(a.grey_map, 1, mode='constant', constant_values=(255, 255))
+    # 在超采样前, 先在周围围一圈黑色
+    padded_a = np.pad(a.grey_map, 1, mode='constant', constant_values=(0, 0))
     upscaled_padded_a = cv2.resize(padded_a, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_LINEAR)   # fixme
     # 超采样之后的 centroid 坐标
     upscaled_padded_a_cx = upscaled_coord(a.cx + 1, upscale)  # +1 是因为 padding
     upscaled_padded_a_cy = upscaled_coord(a.cy + 1, upscale)
-    assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(255-upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
+    assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
     # 为了将超采样后的 up_a1 和 canvas 的 centroid 对齐, 计算需要移动的量
     canvas_cx = center_of_rect(canvas_w)
     canvas_cy = center_of_rect(canvas_h)
@@ -75,7 +75,7 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     move_x_int, move_x_f32 = float_split(move_x)
     move_y_int, move_y_f32 = float_split(move_y)
     # 初始化 area 的 canvas
-    can = np.ones((canvas_h, canvas_w), dtype="f4") * 255   # ones * 255: 初始化背景为白色
+    can = np.zeros((canvas_h, canvas_w), dtype="f4")   # 初始化背景为黑色
     # 整数级别的移动
     can[move_y_int : move_y_int + upscaled_padded_a.shape[0], move_x_int : move_x_int + upscaled_padded_a.shape[1]] = upscaled_padded_a
     # 亚像素级别的移动
@@ -138,9 +138,9 @@ if __name__ == "__main__":
         x, y, w, h, area = label_stats[idx]
         view = (slice(y, y + h), slice(x, x + w))           # x 向右, y 向下, 因此 y 才是 i, x 才是 j!
         bin_mask = (label_map[view] == idx)
-        grey_map = np.where(bin_mask, grey_img[view], 255)  # fixme: 1.这里假设了背景色是 255;  2.被 bin_mask 约束使得遗漏浅色抗锯齿部分
-        centroid = calc_centroid(255 - grey_map)            # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
-        mass = np.sum(grey_map)                             # 基于灰度图计算, 此前是基于 bin_mask 计算的 (area)
+        grey_map = np.where(bin_mask, 255 - grey_img[view], 0)  # 这里假设背景色是 0, 前景是 1~255;  fixme: 被 bin_mask 约束使得遗漏浅色抗锯齿部分
+        centroid = calc_centroid(grey_map)                      # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
+        mass = np.sum(grey_map)                                 # 基于灰度图计算, 此前是基于 bin_mask 计算的
         areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_map=grey_map))
 
     # 绘制每个连通域
@@ -152,9 +152,6 @@ if __name__ == "__main__":
         debug_img = cv2.resize(debug_img, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_LINEAR)
         cv2.imwrite(f"result/{area.idx}.png", debug_img)   # fixme: 保存图片, 但重心对齐, 为了思考如何将相似的区域聚类到一起...
     plt.show()
-
-    # test_centroids_aligned_mean
-
 
     # 2023-04-03
     # TODO: 将相似的 Area 聚类到一起
@@ -190,7 +187,7 @@ if __name__ == "__main__":
         # 整数移动 (由于可能越界, 目前用 except 忽略潜在的错误)
         try:
             new_img[should_move_y_int: should_move_y_int + symbol_refined.shape[0],
-                    should_move_x_int: should_move_x_int + symbol_refined.shape[1]] += (255-symbol_refined)
+                    should_move_x_int: should_move_x_int + symbol_refined.shape[1]] += symbol_refined
         except Exception as e:
             print(e)
 
