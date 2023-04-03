@@ -8,15 +8,15 @@ from typing import Iterable
 
 # 区域类
 class Area:
-    __slots__ = ["idx", "x", "y", "w", "h", "cx", "cy", "mass", "bin_mask", "grey_map", "symbol_id", "feat_vec"]
-    def __init__(s, idx, x, y, w, h, cx, cy, mass, bin_mask, grey_map):
-        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.mass, s.bin_mask, s.grey_map) = (idx, x, y, w, h, cx, cy, mass, bin_mask, grey_map)
+    __slots__ = ["idx", "x", "y", "w", "h", "cx", "cy", "mass", "bin_mask", "grey_mask", "symbol_id", "feat_mat", "feat_mass"]
+    def __init__(s, idx, x, y, w, h, cx, cy, mass, bin_mask, grey_mask):
+        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.mass, s.bin_mask, s.grey_mask) = (idx, x, y, w, h, cx, cy, mass, bin_mask, grey_mask)
 
 # 符号类
 class Symbol:
-    __slots__ = ["grey_map", "cx", "cy"]
-    def __init__(s, grey_map, cx, cy):
-        (s.grey_map, s.cx, s.cy) = (grey_map, cx, cy)
+    __slots__ = ["grey_mask", "cx", "cy"]
+    def __init__(s, grey_mask, cx, cy):
+        (s.grey_mask, s.cx, s.cy) = (grey_mask, cx, cy)
 
 # 计算质心
 def calc_centroid(mat: np.ndarray) -> np.ndarray:
@@ -60,7 +60,7 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     assert upscale > 0 and upscale % 1 == 0, "仅支持整数倍放大!"
     assert canvas_w >= canvas_w_at_least and canvas_h >= canvas_h_at_least, "提供的画布尺寸太小!"
     # 在超采样前, 先在周围围一圈黑色
-    padded_a = np.pad(a.grey_map, 1, mode='constant', constant_values=(0, 0))
+    padded_a = np.pad(a.grey_mask, 1, mode='constant', constant_values=(0, 0))
     upscaled_padded_a = cv2.resize(padded_a, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_LINEAR)   # fixme
     # 超采样之后的 centroid 坐标
     upscaled_padded_a_cx = upscaled_coord(a.cx + 1, upscale)  # +1 是因为 padding
@@ -138,34 +138,73 @@ if __name__ == "__main__":
         x, y, w, h, area = label_stats[idx]
         view = (slice(y, y + h), slice(x, x + w))           # x 向右, y 向下, 因此 y 才是 i, x 才是 j!
         bin_mask = (label_map[view] == idx)
-        grey_map = np.where(bin_mask, 255 - grey_img[view], 0)  # 这里假设背景色是 0, 前景是 1~255;  fixme: 被 bin_mask 约束使得遗漏浅色抗锯齿部分
-        centroid = calc_centroid(grey_map)                      # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
-        mass = np.sum(grey_map)                                 # 基于灰度图计算, 此前是基于 bin_mask 计算的
-        areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_map=grey_map))
+        grey_mask = np.where(bin_mask, 255 - grey_img[view], 0)  # 这里假设背景色是 0, 前景是 1~255;  fixme: 被 bin_mask 约束使得遗漏浅色抗锯齿部分
+        centroid = calc_centroid(grey_mask)                      # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
+        mass = np.sum(grey_mask)                                 # 基于灰度图计算, 此前是基于 bin_mask 计算的
+        areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_mask=grey_mask))
 
     # 绘制每个连通域
     for area in tqdm(areas):
         plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
-        # cv2.imwrite(f"result/{area.idx}.png", area.grey_map)   # 保存图片
+        # cv2.imwrite(f"result/{area.idx}.png", area.grey_mask)   # 保存图片
         debug_img = centroids_aligned_mean([area,], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0].astype("u1")
-        debug_img = cv2.resize(debug_img, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_LINEAR)
+        debug_img = cv2.resize(debug_img, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST)
+        debug_img = cv2.GaussianBlur(debug_img, (3, 3), 0)
         cv2.imwrite(f"result/{area.idx}.png", debug_img)   # fixme: 保存图片, 但重心对齐, 为了思考如何将相似的区域聚类到一起...
     plt.show()
 
-    # 2023-04-03
-    # TODO: 将相似的 Area 聚类到一起
+    # 为每个 Area 计算 feature (目前用一个 20*20 的矩阵来表征)
+    for area in tqdm(areas):
+        feat_mat = centroids_aligned_mean([area,], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0]
+        feat_mat = cv2.resize(feat_mat, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST)
+        feat_mat = cv2.GaussianBlur(feat_mat, (3, 3), 0)
+        if feat_mat.shape == (20, 20):
+            area.feat_mat = feat_mat
+            area.feat_mass = np.sum(feat_mat)
+        else:
+            area.feat_mat = None
+            print(f"area_{area.idx} 的尺寸较大, feat_mat 超出 20*20, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
 
+    # 将相似的 Area 聚类到一起
+    Cluster = list[Area]                # Cluster 中的 area 应该是相似的, 第一个元素作为 "leader"
+    clusters: list[Cluster] = []
+    difference_threshold = 0.20         # 差异度阈值: 差异度定义为: sum(|A-B|) / (sum(A)+sum(B)), 取值范围 [0, 1], 0: 完全重叠, 1: 完全不重叠.
+    shape_ratio_threshold = 0.7         # 边长比例阈值: 仅用于加速, 筛掉明显不匹配的
+    mass_ratio_threshold = 0.7          # 灰度面积阈值: 仅用于加速, 筛掉明显不匹配的
+    for area in tqdm(areas):
+        if area.feat_mat is None:       # 不参与合并的大图案
+            clusters.append([area,])    # 作为一个独立的 cluster
+            continue
+        all_clusters_which_satisfy_threshold: list[(Cluster, float)] = []   # 所有满足阈值的 cluster, 以及其与 area 的差异度, (最后会从中选出最相似的那个 Cluster)
+        for cluster in clusters:
+            cluster_leader: Area = cluster[0]
+            if cluster_leader.feat_mat is None: continue
+            if not (shape_ratio_threshold <= (area.h / cluster_leader.h) <= 1 / shape_ratio_threshold): continue
+            if not (shape_ratio_threshold <= (area.w / cluster_leader.w) <= 1 / shape_ratio_threshold): continue
+            if not (mass_ratio_threshold <= (area.mass / cluster_leader.mass) <= 1 / mass_ratio_threshold): continue
+            if (difference := (np.sum(np.abs(area.feat_mat - cluster_leader.feat_mat)) / ((area.feat_mass + cluster_leader.feat_mass) / 2))) < difference_threshold:
+                # 差异度 difference 定义为: sum(|A-B|) / (sum(A)+sum(B)), 有种 IoU 的感觉, 只不过这里是 diff-over-union
+                all_clusters_which_satisfy_threshold.append((cluster, difference))
+        if len(all_clusters_which_satisfy_threshold) == 0:  # 没有找到相似的 cluster, 则新建一个 cluster
+            clusters.append([area,])
+        else:                                            # 找到了相似的 cluster, 则将 area 加入其中
+            all_clusters_which_satisfy_threshold.sort(key=lambda x: x[1])
+            most_similar_cluster = all_clusters_which_satisfy_threshold[0][0]
+            most_similar_cluster.append(area)
 
-    # 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号,
-    # 这个符号由 (grey_map, cx, cy) 表征, 其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子
-    # (因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
-    upscale = 2  # 多帧融合时使用的超采样倍率
+    print(f"对 {len(areas)} 个 Area, 产生了 {len(clusters)} 个 Cluster")
+
+    # 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号, 这个符号由 (grey_mask, cx, cy) 表征 (其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子, 因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
     symbol_table: list[Symbol] = []
-    for similar_areas in [[a] for a in areas]:  # fixme: 目前每个 symbol 仅由一个 area 合成
+
+    upscale = 2  # 多帧融合时使用的超采样倍率
+    # clusters = [[a] for a in areas]  # debug: 每个 symbol 仅由一个 area 合成
+    # 对于每个 Cluster: 将其中包含的 Areas 合并为一个 Symbol, 并让这些 Areas 统统指向这个 Symbol
+    for similar_areas in clusters:
         # 根据相似的 Area 制作 Symbol
-        grey_map, cx, cy = centroids_aligned_mean(similar_areas, upscale=upscale)
-        symbol_table.append(Symbol(grey_map=grey_map, cx=cx, cy=cy))
+        grey_mask, cx, cy = centroids_aligned_mean(similar_areas, upscale=upscale)
+        symbol_table.append(Symbol(grey_mask=grey_mask, cx=cx, cy=cy))
         for area in similar_areas:
             area.symbol_id = len(symbol_table) - 1
 
@@ -183,7 +222,7 @@ if __name__ == "__main__":
         should_move_x_int, should_move_x_f32 = float_split(should_move_x)
         should_move_y_int, should_move_y_f32 = float_split(should_move_y)
         # 浮点移动
-        symbol_refined = move_img_subpixel(symbol.grey_map, should_move_x_f32, should_move_y_f32)
+        symbol_refined = move_img_subpixel(symbol.grey_mask, should_move_x_f32, should_move_y_f32)
         # 整数移动 (由于可能越界, 目前用 except 忽略潜在的错误)
         try:
             new_img[should_move_y_int: should_move_y_int + symbol_refined.shape[0],
