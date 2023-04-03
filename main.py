@@ -4,14 +4,13 @@ import matplotlib.pyplot as plt
 import cv2
 import os
 from tqdm import trange, tqdm
-from dataclasses import dataclass
 from typing import Iterable
 
 # 区域类
 class Area:
-    __slots__ = ["idx", "x", "y", "w", "h", "cx", "cy", "area", "bin_mask", "grey_map", "symbol_id"]
-    def __init__(s, idx, x, y, w, h, cx, cy, area, bin_mask, grey_map, symbol_id):
-        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.area, s.bin_mask, s.grey_map, s.symbol_id) = (idx, x, y, w, h, cx, cy, area, bin_mask, grey_map, symbol_id)
+    __slots__ = ["idx", "x", "y", "w", "h", "cx", "cy", "mass", "bin_mask", "grey_map", "symbol_id", "feat_vec"]
+    def __init__(s, idx, x, y, w, h, cx, cy, mass, bin_mask, grey_map):
+        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.mass, s.bin_mask, s.grey_map) = (idx, x, y, w, h, cx, cy, mass, bin_mask, grey_map)
 
 # 符号类
 class Symbol:
@@ -53,8 +52,8 @@ def center_of_rect(s: int) -> float:
 def float_split(x: float) -> (int, float):
     return (i := np.round(x).astype("i4")), x - i
 
-# 在高分辨率下, 将两个区域的 centroid 对齐
-def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upscale: int, canvas_w: int = None, canvas_h : int = None) -> np.ndarray:
+# 将 area 超采样后, 将其重心移动到 target_canvas 的中心, 并返回 target_canvas
+def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upscale: int, canvas_w: int, canvas_h : int) -> np.ndarray:
     # Note: 目前的实现方式是 先双线性超采样, 然后再移动. 这样涉及两次近似. todo: 可以基于 cv2.remap 实现成仅需一次近似.
     canvas_w_at_least = int(max(a.cx, a.w - a.cx) + 3) * 2 * upscale     # +3: 留出余量空间
     canvas_h_at_least = int(max(a.cy, a.h - a.cy) + 3) * 2 * upscale
@@ -84,11 +83,15 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     return can
 
 # 在高分辨率下, 将若干个区域的 centroid 对齐
-def centroids_aligned_mean(areas: Iterable[Area], upscale: int) -> (np.ndarray, float, float):
+def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_least_debug_prompt: int = 0, canvas_w_at_least_debug_prompt: int = 0) -> (np.ndarray, float, float):
     # Note: 目前的实现方式是 先双线性超采样, 然后再移动. 这样涉及两次近似. todo: 可以基于 cv2.remap 实现成仅需一次近似.
+    # 以下会自行决定合适的 canvas 尺寸以保证能容纳所有重心对齐的 areas,
+    # 但用户可以通过 canvas_h_at_least_debug_prompt 和 canvas_w_at_least_debug_prompt 来指定最小尺寸. (Debug 用)
     assert upscale > 0 and upscale % 1 == 0
     canvas_h = int(max(max(a.cy, a.h - a.cy) for a in areas) + 3) * 2 * upscale     # +3: 留出余量空间
     canvas_w = int(max(max(a.cx, a.w - a.cx) for a in areas) + 3) * 2 * upscale
+    if canvas_h < canvas_h_at_least_debug_prompt: canvas_h = canvas_h_at_least_debug_prompt  # Debug
+    if canvas_w < canvas_w_at_least_debug_prompt: canvas_w = canvas_w_at_least_debug_prompt  # Debug
     all_canvas = np.array([move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a, upscale, canvas_w, canvas_h) for a in areas])
     return np.mean(all_canvas, axis=0), (canvas_w-1) / 2, (canvas_h-1) / 2
 
@@ -137,35 +140,40 @@ if __name__ == "__main__":
         bin_mask = (label_map[view] == idx)
         grey_map = np.where(bin_mask, grey_img[view], 255)  # fixme: 1.这里假设了背景色是 255;  2.被 bin_mask 约束使得遗漏浅色抗锯齿部分
         centroid = calc_centroid(255 - grey_map)            # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
-        areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], area=area, bin_mask=bin_mask, grey_map=grey_map, symbol_id=None))
+        mass = np.sum(grey_map)                             # 基于灰度图计算, 此前是基于 bin_mask 计算的 (area)
+        areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_map=grey_map))
 
     # 绘制每个连通域
     for area in tqdm(areas):
         plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
-        cv2.imwrite(f"result/{area.idx}.png", area.grey_map)   # 保存图片
+        # cv2.imwrite(f"result/{area.idx}.png", area.grey_map)   # 保存图片
+        debug_img = centroids_aligned_mean([area,], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0].astype("u1")
+        debug_img = cv2.resize(debug_img, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_LINEAR)
+        cv2.imwrite(f"result/{area.idx}.png", debug_img)   # fixme: 保存图片, 但重心对齐, 为了思考如何将相似的区域聚类到一起...
     plt.show()
 
-    # test_centroids_aligned_mean()
+    # test_centroids_aligned_mean
 
-    upscale = 2  # 超采样倍率
 
     # 2023-04-03
-    # TODO:
-    # 1. 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号,
+    # TODO: 将相似的 Area 聚类到一起
+
+
+    # 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号,
     # 这个符号由 (grey_map, cx, cy) 表征, 其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子
     # (因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
+    upscale = 2  # 多帧融合时使用的超采样倍率
     symbol_table: list[Symbol] = []
-    for similar_areas in [ [a] for a in areas ]:  # fixme: 目前每个 symbol 仅由一个 area 合成
+    for similar_areas in [[a] for a in areas]:  # fixme: 目前每个 symbol 仅由一个 area 合成
         # 根据相似的 Area 制作 Symbol
         grey_map, cx, cy = centroids_aligned_mean(similar_areas, upscale=upscale)
         symbol_table.append(Symbol(grey_map=grey_map, cx=cx, cy=cy))
         for area in similar_areas:
             area.symbol_id = len(symbol_table) - 1
 
-    # 2. 构建一个 4x 大的空白图片, 把每个符号都放到这个图片上.
+    # 构建一个 4x 大的空白图片, 把每个符号都放到这个图片上.
     new_img = np.zeros(shape=[upscale * grey_img.shape[0], upscale * grey_img.shape[1]])
-
     for area in areas:
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
@@ -190,7 +198,7 @@ if __name__ == "__main__":
     plt.imshow(new_img)
     plt.show()
 
-    # 3. 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
+    # TODO: 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
 
 
 
