@@ -4,11 +4,20 @@ import matplotlib.pyplot as plt
 import cv2
 import os
 from tqdm import trange, tqdm
-from collections import namedtuple
+from dataclasses import dataclass
 from typing import Iterable
 
-# 存储区域信息
-Area = namedtuple("Area", ["idx", "x", "y", "w", "h", "cx", "cy", "area", "bin_mask", "grey_map", "symbol_id"])
+# 区域类
+class Area:
+    __slots__ = ["idx", "x", "y", "w", "h", "cx", "cy", "area", "bin_mask", "grey_map", "symbol_id"]
+    def __init__(s, idx, x, y, w, h, cx, cy, area, bin_mask, grey_map, symbol_id):
+        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.area, s.bin_mask, s.grey_map, s.symbol_id) = (idx, x, y, w, h, cx, cy, area, bin_mask, grey_map, symbol_id)
+
+# 符号类
+class Symbol:
+    __slots__ = ["grey_map", "cx", "cy"]
+    def __init__(s, grey_map, cx, cy):
+        (s.grey_map, s.cx, s.cy) = (grey_map, cx, cy)
 
 # 计算质心
 def calc_centroid(mat: np.ndarray) -> np.ndarray:
@@ -24,13 +33,25 @@ def move_img_subpixel(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
     h, w = img.shape
     padded = np.pad(img, 1, mode="edge")
     x, y = np.meshgrid(np.arange(1, w + 1, dtype="f4") - dx, np.arange(1, h + 1, dtype="f4") - dy)
-    return cv2.remap(padded, x, y, cv2.INTER_NEAREST)
+    return cv2.remap(padded, x, y, cv2.INTER_LINEAR)
 
 # 测试亚像素图片移动
 def test_move_img_subpixel(img_path, save_folder):
     img3 = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     for delta in np.linspace(0, 0.99, 10):
         cv2.imwrite(f"{save_folder}/test_13_moved_{delta}.png", move_img_subpixel(img3, delta, delta))
+
+# 一个质点(比如重心)在 upscale 后的新坐标
+def upscaled_coord(x: float, upscale: int) -> float:
+    return x * upscale + 0.5 * (upscale - 1)    # * s + 0.5(s-1) 基于 NEAREST 可以轻易推导 (认为像素坐标点是撑满图片的小方块的中心点). 但对 LINEAR 好像也成立.
+
+# 一个 w, h 实心矩形的中心点坐标
+def center_of_rect(s: int) -> float:
+    return (s - 1) / 2
+
+# 将一个 float 拆成 int + float
+def float_split(x: float) -> (int, float):
+    return (i := np.round(x).astype("i4")), x - i
 
 # 在高分辨率下, 将两个区域的 centroid 对齐
 def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upscale: int, canvas_w: int = None, canvas_h : int = None) -> np.ndarray:
@@ -43,19 +64,17 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     padded_a = np.pad(a.grey_map, 1, mode='constant', constant_values=(255, 255))
     upscaled_padded_a = cv2.resize(padded_a, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_LINEAR)   # fixme
     # 超采样之后的 centroid 坐标
-    upscaled_padded_a_cx = ((a.cx + 1) * upscale + 0.5 * (upscale - 1))     # +1 是因为 padding, * s + 0.5(s-1) 是因为 upscale.
-    upscaled_padded_a_cy = ((a.cy + 1) * upscale + 0.5 * (upscale - 1))     # 基于 NEAREST 可以轻易推导 (认为像素坐标点是撑满图片的小方块的中心点). 但对 LINEAR 好像也成立.
-    # assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(255-upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
+    upscaled_padded_a_cx = upscaled_coord(a.cx + 1, upscale)  # +1 是因为 padding
+    upscaled_padded_a_cy = upscaled_coord(a.cy + 1, upscale)
+    assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(255-upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
     # 为了将超采样后的 up_a1 和 canvas 的 centroid 对齐, 计算需要移动的量
-    canvas_cx = (canvas_w - 1) / 2
-    canvas_cy = (canvas_h - 1) / 2
+    canvas_cx = center_of_rect(canvas_w)
+    canvas_cy = center_of_rect(canvas_h)
     move_x = canvas_cx - upscaled_padded_a_cx
     move_y = canvas_cy - upscaled_padded_a_cy
     # 将移动量转换为整数和小数部分, 整数部分用于数组级别的移动, 小数部分用于亚像素级别的移动
-    move_x_int = np.round(move_x).astype("i4")
-    move_y_int = np.round(move_y).astype("i4")
-    move_x_f32 = move_x - move_x_int
-    move_y_f32 = move_y - move_y_int
+    move_x_int, move_x_f32 = float_split(move_x)
+    move_y_int, move_y_f32 = float_split(move_y)
     # 初始化 area 的 canvas
     can = np.ones((canvas_h, canvas_w), dtype="f4") * 255   # ones * 255: 初始化背景为白色
     # 整数级别的移动
@@ -65,13 +84,13 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     return can
 
 # 在高分辨率下, 将若干个区域的 centroid 对齐
-def centroids_aligned_mean(areas: Iterable[Area], upscale: int) -> np.ndarray:
+def centroids_aligned_mean(areas: Iterable[Area], upscale: int) -> (np.ndarray, float, float):
     # Note: 目前的实现方式是 先双线性超采样, 然后再移动. 这样涉及两次近似. todo: 可以基于 cv2.remap 实现成仅需一次近似.
     assert upscale > 0 and upscale % 1 == 0
     canvas_h = int(max(max(a.cy, a.h - a.cy) for a in areas) + 3) * 2 * upscale     # +3: 留出余量空间
     canvas_w = int(max(max(a.cx, a.w - a.cx) for a in areas) + 3) * 2 * upscale
     all_canvas = np.array([move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a, upscale, canvas_w, canvas_h) for a in areas])
-    return np.mean(all_canvas, axis=0)      # min(), max(), median() 实验效果不佳
+    return np.mean(all_canvas, axis=0), (canvas_w-1) / 2, (canvas_h-1) / 2
 
 # 测试 centroids_aligned_mean()
 def test_centroids_aligned_mean():
@@ -84,7 +103,7 @@ def test_centroids_aligned_mean():
     ]):
         upscale = 2                                                         # 超采样倍率
         similar_areas = [areas[i - 1] for i in similar_indices]
-        grey_result = centroids_aligned_mean(similar_areas, upscale=upscale)
+        grey_result, _, _ = centroids_aligned_mean(similar_areas, upscale=upscale)
         plt.imshow(grey_result); plt.show()
         cv2.imwrite(f"test_centroids_aligned_mean_{test_id}_{len(similar_indices)}_up={upscale}.png", grey_result)
 
@@ -129,10 +148,65 @@ if __name__ == "__main__":
 
     # test_centroids_aligned_mean()
 
-    # 2023-04-03 TODO:
-    # 1. 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号, 这个符号由 (grey_map, cx, cy) 表征, 其中 cx, cy 应该都是 int + 0.5 的样子 (因为 2x 超分后 canvas 是偶数边长的, 然后 centroid() 返回的 area 是重心中心化的).
+    upscale = 2  # 超采样倍率
+
+    # 2023-04-03
+    # TODO:
+    # 1. 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号,
+    # 这个符号由 (grey_map, cx, cy) 表征, 其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子
+    # (因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
+    symbol_table: list[Symbol] = []
+    for similar_areas in [ [a] for a in areas ]:  # fixme: 目前每个 symbol 仅由一个 area 合成
+        # 根据相似的 Area 制作 Symbol
+        grey_map, cx, cy = centroids_aligned_mean(similar_areas, upscale=upscale)
+        symbol_table.append(Symbol(grey_map=grey_map, cx=cx, cy=cy))
+        for area in similar_areas:
+            area.symbol_id = len(symbol_table) - 1
+
     # 2. 构建一个 4x 大的空白图片, 把每个符号都放到这个图片上.
+    new_img = np.zeros(shape=[upscale * grey_img.shape[0], upscale * grey_img.shape[1]])
+
+    for area in areas:
+        symbol = symbol_table[area.symbol_id]
+        # 计算原 area 的重心在新图片上的位置
+        cx_should_be = upscaled_coord(area.cx + area.x, upscale)
+        cy_should_be = upscaled_coord(area.cy + area.y, upscale)
+        # 计算 symbol 在与 new_img 左上角对齐时, 还需要移动多少距离才能使得重心对齐 c_should_be
+        should_move_x = cx_should_be - symbol.cx
+        should_move_y = cy_should_be - symbol.cy
+        # 将偏移量拆成整数和浮点两部分, 整数部分用索引解决, 浮点部分用 move_subpixel() 解决
+        should_move_x_int, should_move_x_f32 = float_split(should_move_x)
+        should_move_y_int, should_move_y_f32 = float_split(should_move_y)
+        # 浮点移动
+        symbol_refined = move_img_subpixel(symbol.grey_map, should_move_x_f32, should_move_y_f32)
+        # 整数移动 (由于可能越界, 目前用 except 忽略潜在的错误)
+        try:
+            new_img[should_move_y_int: should_move_y_int + symbol_refined.shape[0],
+                    should_move_x_int: should_move_x_int + symbol_refined.shape[1]] += (255-symbol_refined)
+        except Exception as e:
+            print(e)
+
+    cv2.imwrite("result/new_img.png", (255-new_img).astype(np.uint8))
+    plt.imshow(new_img)
+    plt.show()
+
     # 3. 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
