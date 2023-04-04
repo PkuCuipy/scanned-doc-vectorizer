@@ -9,14 +9,48 @@ from typing import Iterable
 # 区域类
 class Area:
     __slots__ = ["idx", "x", "y", "w", "h", "cx", "cy", "mass", "bin_mask", "grey_mask", "symbol_id", "feat_mat", "feat_mass"]
-    def __init__(s, idx, x, y, w, h, cx, cy, mass, bin_mask, grey_mask):
-        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.mass, s.bin_mask, s.grey_mask) = (idx, x, y, w, h, cx, cy, mass, bin_mask, grey_mask)
+    def __init__(s, *, idx=None, x=None, y=None, w=None, h=None, cx=None, cy=None, mass=None, bin_mask=None, grey_mask=None, symbol_id=None, feat_mat=None, feat_mass=None):
+        (s.idx, s.x, s.y, s.w, s.h, s.cx, s.cy, s.mass, s.bin_mask, s.grey_mask, s.symbol_id, s.feat_mat, s.feat_mass) = (idx, x, y, w, h, cx, cy, mass, bin_mask, grey_mask, symbol_id, feat_mat, feat_mass)
 
 # 符号类
 class Symbol:
     __slots__ = ["grey_mask", "cx", "cy"]
-    def __init__(s, grey_mask, cx, cy):
+    def __init__(s, *, grey_mask, cx, cy):
         (s.grey_mask, s.cx, s.cy) = (grey_mask, cx, cy)
+
+# 区域聚簇类:
+class Cluster:
+    __slots__ = ["areas", "do_not_try_merge", "_feat_mat__sum", "_feat_mass__sum", "_w__sum", "_h__sum", "_mass__sum"]
+    def __init__(self, first_area: Area):
+        self.areas = [first_area, ]                     # Cluster 中的 area 应该是相似的
+        self.do_not_try_merge = (first_area.feat_mat is None)
+        if not self.do_not_try_merge:
+            self._w__sum = first_area.w
+            self._h__sum = first_area.h
+            self._mass__sum = first_area.mass
+            self._feat_mat__sum = first_area.feat_mat.copy()    # 这里必须 copy!! 否则会导致后续的 append_area 会修改到 first_area.feat_mat
+            self._feat_mass__sum = first_area.feat_mass         # 注意区分 feat_mass 和 mass!! 前者是 sum(feat_mat), 后者是 sum(grey_mask)
+
+    def get_average_area(self) -> Area:
+        # return self.areas[0]    # debug: 模拟之前的 "leader" 模式, 即返回第一个 area 作为整个 cluster 的代表
+        # 返回一个虚拟的 areas (仅有 feature 部分非 None), 其 feature 是当前 Cluster 的 areas 的 feature 的平均值
+        n = len(self.areas)
+        if n == 1:
+            return self.areas[0]    # 优化加速
+        return Area(w=self._w__sum / n, h=self._h__sum / n, mass=self._mass__sum / n,
+                    feat_mat=self._feat_mat__sum / n, feat_mass=self._feat_mass__sum / n)
+
+    def append_area(self, area: Area):
+        self.areas.append(area)
+        self._feat_mat__sum += area.feat_mat
+        self._w__sum += area.w
+        self._h__sum += area.h
+        self._mass__sum += area.mass
+
+    def __iter__(self):
+        return iter(self.areas)
+
+
 
 # 计算质心
 def calc_centroid(mat: np.ndarray) -> np.ndarray:
@@ -65,7 +99,7 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     # 超采样之后的 centroid 坐标
     upscaled_padded_a_cx = upscaled_coord(a.cx + 1, upscale)  # +1 是因为 padding
     upscaled_padded_a_cy = upscaled_coord(a.cy + 1, upscale)
-    assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
+    # assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
     # 为了将超采样后的 up_a1 和 canvas 的 centroid 对齐, 计算需要移动的量
     canvas_cx = center_of_rect(canvas_w)
     canvas_cy = center_of_rect(canvas_h)
@@ -138,12 +172,11 @@ if __name__ == "__main__":
     grey_img = np.array(cv2.imread("data/test_14.png", cv2.IMREAD_GRAYSCALE))
     grey_img = cv2.resize(grey_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
     bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
-    plt.imshow(bin_img, cmap="gray")
-    plt.show()
+    # plt.imshow(bin_img, cmap="gray")
+    # plt.show()
 
     # 提取所有的连通区域
     nr_labels, label_map, label_stats, label_centroids = cv2.connectedComponentsWithStats(bin_img, connectivity=8)    # fixme: 使用 4-连通, 尽可能缩小每个区域, 似乎更适合英文; 8-连通似乎适合中文
-    plt.imshow(label_map, cmap="jet")
 
     # 保存每个连通区域的信息
     areas = []
@@ -157,6 +190,7 @@ if __name__ == "__main__":
         areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_mask=grey_mask))
 
     # 绘制每个连通域
+    plt.imshow(label_map, cmap="jet")   # label_map 作为背景色, 绘制 bbox 于其上
     for area in tqdm(areas):
         plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
@@ -166,7 +200,7 @@ if __name__ == "__main__":
     # 为每个 Area 计算 feature (目前用一个 20*20 的矩阵来表征)
     for area in tqdm(areas):
         feat_mat = calc_feat_mat(area)
-        cv2.imwrite(f"result/{area.idx}.png", feat_mat)  # fixme: 保存图片, 但重心对齐, 为了思考如何将相似的区域聚类到一起...
+        # cv2.imwrite(f"result/{area.idx}.png", feat_mat)
         if feat_mat.shape == (20, 20):
             area.feat_mat = feat_mat
             area.feat_mass = np.sum(feat_mat)
@@ -175,37 +209,38 @@ if __name__ == "__main__":
             print(f"area_{area.idx} 的尺寸较大, feat_mat 超出 20*20, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
 
     # 将相似的 Area 聚类到一起
-    Cluster = list[Area]                # Cluster 中的 area 应该是相似的, 第一个元素作为 "leader"
     clusters: list[Cluster] = []
-    difference_threshold = 0.20         # 差异度阈值: diff ∈ [0, 1], 0: 完全重叠, 1: 完全不重叠.
+    difference_threshold = 0.25         # 差异度阈值: diff ∈ [0, 1], 0: 完全重叠, 1: 完全不重叠.
     shape_ratio_threshold = 0.7         # 边长比例阈值: 仅用于加速, 筛掉明显不匹配的
     mass_ratio_threshold = 0.7          # 灰度面积阈值: 仅用于加速, 筛掉明显不匹配的
     for area in tqdm(areas):
-        if area.feat_mat is None:       # 不参与合并的大图案
-            clusters.append([area,])    # 作为一个独立的 cluster
+        if area.feat_mat is None:           # 不参与合并的大图案
+            clusters.append(Cluster(area))  # 作为一个独立的 cluster
             continue
-        all_clusters_which_satisfy_threshold: list[(Cluster, float)] = []   # 所有满足阈值的 cluster, 以及其与 area 的差异度, (最后会从中选出最相似的那个 Cluster)
+        all_clusters_which_satisfy_threshold: list[tuple[Cluster, float]] = []   # 所有满足阈值的 cluster, 以及其与 area 的差异度, (最后会从中选出最相似的那个 Cluster)
         for cluster in clusters:
-            cluster_leader: Area = cluster[0]
-            if cluster_leader.feat_mat is None: continue
-            if not (shape_ratio_threshold <= (area.h / cluster_leader.h) <= 1 / shape_ratio_threshold): continue
-            if not (shape_ratio_threshold <= (area.w / cluster_leader.w) <= 1 / shape_ratio_threshold): continue
-            if not (mass_ratio_threshold <= (area.mass / cluster_leader.mass) <= 1 / mass_ratio_threshold): continue
-            if (difference := calc_feat_diff(area, cluster_leader)) < difference_threshold:
+            if cluster.do_not_try_merge: continue
+            cluster_leader: Area = cluster.get_average_area()
+            if not (shape_ratio_threshold <= (area.h / cluster_leader.h) <= 1 / shape_ratio_threshold): continue        # 高度差太多, 直接否决
+            if not (shape_ratio_threshold <= (area.w / cluster_leader.w) <= 1 / shape_ratio_threshold): continue        # 宽度差太多, 直接否决
+            if not (mass_ratio_threshold <= (area.mass / cluster_leader.mass) <= 1 / mass_ratio_threshold): continue    # 面积差太多, 直接否决
+            if (difference := calc_feat_diff(area, cluster_leader)) < difference_threshold:     # 差异度小于阈值, 加入
                 all_clusters_which_satisfy_threshold.append((cluster, difference))
         if len(all_clusters_which_satisfy_threshold) == 0:  # 没有找到相似的 cluster, 则新建一个 cluster
-            clusters.append([area,])
+            clusters.append(Cluster(area))
         else:                                            # 找到了相似的 cluster, 则将 area 加入其中
             all_clusters_which_satisfy_threshold.sort(key=lambda x: x[1])
             most_similar_cluster = all_clusters_which_satisfy_threshold[0][0]
-            most_similar_cluster.append(area)
+            most_similar_cluster.append_area(area)
 
     print(f"对 {len(areas)} 个 Area, 产生了 {len(clusters)} 个 Cluster")
 
     # 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号, 这个符号由 (grey_mask, cx, cy) 表征 (其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子, 因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
     symbol_table: list[Symbol] = []
 
-    upscale = 2  # 多帧融合时使用的超采样倍率
+    # 多帧融合时使用的超采样倍率
+    upscale = 1
+
     # clusters = [[a] for a in areas]  # debug: 每个 symbol 仅由一个 area 合成
     # 对于每个 Cluster: 将其中包含的 Areas 合并为一个 Symbol, 并让这些 Areas 统统指向这个 Symbol
     for similar_areas in clusters:
@@ -217,7 +252,7 @@ if __name__ == "__main__":
 
     # 构建一个 4x 大的空白图片, 把每个符号都放到这个图片上.
     new_img = np.zeros(shape=[upscale * grey_img.shape[0], upscale * grey_img.shape[1]])
-    for area in areas:
+    for area in tqdm(areas):
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
         cx_should_be = upscaled_coord(area.cx + area.x, upscale)
