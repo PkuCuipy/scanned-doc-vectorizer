@@ -110,6 +110,19 @@ def test_centroids_aligned_mean():
         plt.imshow(grey_result); plt.show()
         cv2.imwrite(f"test_centroids_aligned_mean_{test_id}_{len(similar_indices)}_up={upscale}.png", grey_result)
 
+# 传入一个 area, 计算 feature_vector
+def calc_feat_mat(area: Area) -> np.ndarray:
+    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0]
+    feat_mat = cv2.resize(feat_mat, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_LINEAR)
+    feat_mat = np.sqrt(feat_mat) / np.sqrt(255) * 255  # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
+    feat_mat = cv2.GaussianBlur(feat_mat, (3, 3), 0)
+    return feat_mat
+
+# 传入两个 area, 计算他们的 feature 差异度
+def calc_feat_diff(a1: Area, a2: Area) -> float:
+    # 目前差异度 (difference) 定义为: sum(|A-B|) / (sum(A)+sum(B)), 有种 IoU 的感觉, 只不过这里是 diff-over-union
+    return np.sum(np.abs(a1.feat_mat - a2.feat_mat)) / ((a1.feat_mass + a2.feat_mass) / 2)
+
 # ======================================================================================================================
 
 if __name__ == "__main__":
@@ -148,17 +161,12 @@ if __name__ == "__main__":
         plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
         # cv2.imwrite(f"result/{area.idx}.png", area.grey_mask)   # 保存图片
-        debug_img = centroids_aligned_mean([area,], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0].astype("u1")
-        debug_img = cv2.resize(debug_img, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST)
-        debug_img = cv2.GaussianBlur(debug_img, (3, 3), 0)
-        cv2.imwrite(f"result/{area.idx}.png", debug_img)   # fixme: 保存图片, 但重心对齐, 为了思考如何将相似的区域聚类到一起...
     plt.show()
 
     # 为每个 Area 计算 feature (目前用一个 20*20 的矩阵来表征)
     for area in tqdm(areas):
-        feat_mat = centroids_aligned_mean([area,], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0]
-        feat_mat = cv2.resize(feat_mat, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST)
-        feat_mat = cv2.GaussianBlur(feat_mat, (3, 3), 0)
+        feat_mat = calc_feat_mat(area)
+        cv2.imwrite(f"result/{area.idx}.png", feat_mat)  # fixme: 保存图片, 但重心对齐, 为了思考如何将相似的区域聚类到一起...
         if feat_mat.shape == (20, 20):
             area.feat_mat = feat_mat
             area.feat_mass = np.sum(feat_mat)
@@ -169,7 +177,7 @@ if __name__ == "__main__":
     # 将相似的 Area 聚类到一起
     Cluster = list[Area]                # Cluster 中的 area 应该是相似的, 第一个元素作为 "leader"
     clusters: list[Cluster] = []
-    difference_threshold = 0.20         # 差异度阈值: 差异度定义为: sum(|A-B|) / (sum(A)+sum(B)), 取值范围 [0, 1], 0: 完全重叠, 1: 完全不重叠.
+    difference_threshold = 0.20         # 差异度阈值: diff ∈ [0, 1], 0: 完全重叠, 1: 完全不重叠.
     shape_ratio_threshold = 0.7         # 边长比例阈值: 仅用于加速, 筛掉明显不匹配的
     mass_ratio_threshold = 0.7          # 灰度面积阈值: 仅用于加速, 筛掉明显不匹配的
     for area in tqdm(areas):
@@ -183,8 +191,7 @@ if __name__ == "__main__":
             if not (shape_ratio_threshold <= (area.h / cluster_leader.h) <= 1 / shape_ratio_threshold): continue
             if not (shape_ratio_threshold <= (area.w / cluster_leader.w) <= 1 / shape_ratio_threshold): continue
             if not (mass_ratio_threshold <= (area.mass / cluster_leader.mass) <= 1 / mass_ratio_threshold): continue
-            if (difference := (np.sum(np.abs(area.feat_mat - cluster_leader.feat_mat)) / ((area.feat_mass + cluster_leader.feat_mass) / 2))) < difference_threshold:
-                # 差异度 difference 定义为: sum(|A-B|) / (sum(A)+sum(B)), 有种 IoU 的感觉, 只不过这里是 diff-over-union
+            if (difference := calc_feat_diff(area, cluster_leader)) < difference_threshold:
                 all_clusters_which_satisfy_threshold.append((cluster, difference))
         if len(all_clusters_which_satisfy_threshold) == 0:  # 没有找到相似的 cluster, 则新建一个 cluster
             clusters.append([area,])
