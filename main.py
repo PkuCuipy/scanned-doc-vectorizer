@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import cv2
 import os
 from tqdm import trange, tqdm
-from typing import Iterable
+from typing import Iterable, Union
 
 # 区域类
 class Area:
@@ -16,9 +16,9 @@ class Area:
 class Symbol:
     # 每个符号由 (grey_mask, cx, cy) 表征, 其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子,
     # 因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
-    __slots__ = ["grey_mask", "cx", "cy"]
-    def __init__(s, *, grey_mask, cx, cy):
-        (s.grey_mask, s.cx, s.cy) = (grey_mask, cx, cy)
+    __slots__ = ["grey_mask", "cx", "cy", "idx", "debug_nr_areas_merged", "debug_area_ids"]
+    def __init__(s, *, idx, grey_mask, cx, cy, nr_areas_merged=None, area_ids=None):
+        (s.grey_mask, s.cx, s.cy, s.idx, s.debug_nr_areas_merged, s.debug_area_ids) = (grey_mask, cx, cy, idx, nr_areas_merged, area_ids)
 
 # 区域聚簇类:
 class Cluster:
@@ -68,12 +68,6 @@ def move_img_subpixel(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
     padded = np.pad(img, 1, mode="edge")
     x, y = np.meshgrid(np.arange(1, w + 1, dtype="f4") - dx, np.arange(1, h + 1, dtype="f4") - dy)
     return cv2.remap(padded, x, y, cv2.INTER_LINEAR)
-
-# 测试亚像素图片移动
-def test_move_img_subpixel(img_path, save_folder):
-    img3 = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    for delta in np.linspace(0, 0.99, 10):
-        cv2.imwrite(f"{save_folder}/test_13_moved_{delta}.png", move_img_subpixel(img3, delta, delta))
 
 # 一个质点(比如重心)在 upscale 后的新坐标
 def upscaled_coord(x: float, upscale: int) -> float:
@@ -130,33 +124,23 @@ def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_l
     all_canvas = np.array([move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a, upscale, canvas_w, canvas_h) for a in areas])
     return np.mean(all_canvas, axis=0), (canvas_w-1) / 2, (canvas_h-1) / 2
 
-# 测试 centroids_aligned_mean()
-def test_centroids_aligned_mean():
-    for test_id, similar_indices in enumerate([
-        # [54, 337, 1860, 735, 1403, 61, 1549, 305, 1137, 1322, 1604, 1739, 1740, 91, 306, 1406, 1556, 324, 761, 670, 667,675, 962, 1256, 1617, 126, 1816, 484, 473, 1261, 1280, 813, 835, 138, 1678, 1263, 83, 743, 690, 1339, 1027, 49,1383, 1407, 1422, 210, 1241, 1145, 1578, 1759, 810, 832, 1050, 838, 1272, 1445, 1610, 1544, 1068,], # `m`, test_9_down_from_1200
-        # [2314, 2076, 2009, 2323, ], # `都`, test_6
-        # [344, 976, 200, 878, 515, ], # `格`, test_15
-        # [75, 74, 546, 435, 511, 489, 481, 140, 47, ], # `在`, test_15
-        # [1528, 201, 996, 1374, 803, 1342, 909, 914, 573, 854, 149, 1408, 725, 553, 437, 224, 828, 1466, 282, 418, 1190, 44, 484, 842, 153, 580, 773, 1297, 1211, 590, 775, 360, 340, 746, 1500, 4, ], # `m`, test_14
-    ]):
-        upscale = 2                                                         # 超采样倍率
-        similar_areas = [areas[i - 1] for i in similar_indices]
-        grey_result, _, _ = centroids_aligned_mean(similar_areas, upscale=upscale)
-        plt.imshow(grey_result); plt.show()
-        cv2.imwrite(f"test_centroids_aligned_mean_{test_id}_{len(similar_indices)}_up={upscale}.png", grey_result)
 
 # 传入一个 area, 计算 feature_vector
-def calc_feat_mat(area: Area) -> np.ndarray:
-    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_prompt=80, canvas_w_at_least_prompt=80)[0]
-    feat_mat = cv2.resize(feat_mat, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_LINEAR)
-    feat_mat = np.sqrt(feat_mat) / np.sqrt(255) * 255  # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
-    feat_mat = cv2.GaussianBlur(feat_mat, (3, 3), 0)
+def calc_feat_mat(area: Area) -> Union[np.ndarray, None]:
+    PROMPT_CANVAS_SIZE = 20 * 4     # fixme: 超参数, 且请确保是 4 的倍数, 因为下面要用到 4x4 的低通滤波
+    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_prompt=PROMPT_CANVAS_SIZE, canvas_w_at_least_prompt=PROMPT_CANVAS_SIZE)[0]
+    if feat_mat.shape != (PROMPT_CANVAS_SIZE, PROMPT_CANVAS_SIZE):
+        return None  # 这个 area 的尺寸很大, 认为分辨率已足够大, 无需合并超分辨率
+    feat_mat = np.mean(feat_mat.reshape((feat_mat.shape[0] // 4, 4, feat_mat.shape[1] // 4, 4)), axis=(1, 3))    # (4h, 4w) -> (h, w) 低通滤波. (cv2.resize 会导致小像素蜜汁消失, 不懂为啥, 总之弃用)
+    # feat_mat = (feat_mat ** (1/2)) / (255 ** (1/2)) * 255   # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
+    feat_mat = cv2.GaussianBlur(feat_mat, (5, 5), sigmaX=0.7)    # 这个高斯模糊, 对于 test_9 效果很差, 因为会导致误合并; 但对于 test_14 效果很好, 因为否则很难匹配合并..
     return feat_mat
 
 # 传入两个 area, 计算他们的 feature 差异度
 def calc_feat_diff(a1: Area, a2: Area) -> float:
-    # 目前差异度 (difference) 定义为: sum(|A-B|) / (sum(A)+sum(B)), 有种 IoU 的感觉, 只不过这里是 diff-over-union
+    # 目前差异度 (difference) 定义为: sum(|A-B|) / (sum(A)+sum(B)), 有种 diff-over-union 的感觉
     return np.sum(np.abs(a1.feat_mat - a2.feat_mat)) / ((a1.feat_mass + a2.feat_mass) / 2)
+    # return np.sqrt(np.sum(np.square(a1.feat_mat - a2.feat_mat))) / ((a1.feat_mass + a2.feat_mass) / 2)
 
 # ======================================================================================================================
 
@@ -192,22 +176,21 @@ if __name__ == "__main__":
 
     # 绘制每个连通域
     plt.imshow(label_map, cmap="jet")   # label_map 作为背景色, 绘制 bbox 于其上
-    for area in tqdm(areas):
+    for area in tqdm(areas, desc="绘制每个连通域"):
         plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
         # cv2.imwrite(f"result/{area.idx}.png", area.grey_mask)   # 保存图片
     plt.show()
 
     # 为每个 Area 计算 feature (目前用一个 20*20 的矩阵来表征)
-    for area in tqdm(areas):
-        feat_mat = calc_feat_mat(area)
-        # cv2.imwrite(f"result/{area.idx}.png", feat_mat)
-        if feat_mat.shape == (20, 20):
-            area.feat_mat = feat_mat
-            area.feat_mass = np.sum(feat_mat)
+    for area in tqdm(areas, desc="为每个 Area 计算 feat_mat"):
+        area.feat_mat = calc_feat_mat(area)
+        if area.feat_mat is not None:
+            area.feat_mass = np.sum(area.feat_mat)
+            # cv2.imwrite(f"result/{area.idx}.png", feat_mat)   # 打印 feature_mat (20 x 20)
         else:
-            area.feat_mat = None
-            print(f"area_{area.idx} 的尺寸较大, feat_mat 超出 20*20, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
+            # print(f"area_{area.idx} 的尺寸较大, feat_mat 超出 20*20, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
+            pass
 
     # 将相似的 Area 聚类到一起
     USE_LEADER_MODE = True          # 如果使用 "leader" 模式, 那么总是返回第一个 area 作为整个 cluster 的代表
@@ -215,7 +198,7 @@ if __name__ == "__main__":
     SHAPE_RATIO_THRESHOLD = 0.7     # 边长比例阈值: 仅用于加速, 筛掉明显不匹配的
     MASS_RATIO_THRESHOLD = 0.7      # 灰度面积阈值: 仅用于加速, 筛掉明显不匹配的
     clusters: list[Cluster] = []
-    for area in tqdm(areas):
+    for area in tqdm(areas, desc="将相似的 Area 聚类到一个 Cluster 中"):
         if area.feat_mat is None:           # 不参与合并的大图案
             clusters.append(Cluster(area))  # 作为一个独立的 cluster
             continue
@@ -223,9 +206,9 @@ if __name__ == "__main__":
         for cluster in clusters:
             if cluster.do_not_try_merge: continue
             cluster_leader: Area = cluster.get_leader()
-            if not (SHAPE_RATIO_THRESHOLD <= (area.h / cluster_leader.h) <= 1 / SHAPE_RATIO_THRESHOLD): continue        # 高度差太多, 直接否决
-            if not (SHAPE_RATIO_THRESHOLD <= (area.w / cluster_leader.w) <= 1 / SHAPE_RATIO_THRESHOLD): continue        # 宽度差太多, 直接否决
-            if not (MASS_RATIO_THRESHOLD <= (area.mass / cluster_leader.mass) <= 1 / MASS_RATIO_THRESHOLD): continue    # 面积差太多, 直接否决
+            if not (SHAPE_RATIO_THRESHOLD < (area.h / cluster_leader.h) < 1 / SHAPE_RATIO_THRESHOLD): continue        # 高度差太多, 直接否决
+            if not (SHAPE_RATIO_THRESHOLD < (area.w / cluster_leader.w) < 1 / SHAPE_RATIO_THRESHOLD): continue        # 宽度差太多, 直接否决
+            if not (MASS_RATIO_THRESHOLD < (area.mass / cluster_leader.mass) < 1 / MASS_RATIO_THRESHOLD): continue    # 面积差太多, 直接否决
             if (difference := calc_feat_diff(area, cluster_leader)) < DIFFERENCE_THRESHOLD:     # 差异度小于阈值, 加入
                 all_clusters_which_satisfy_threshold.append((cluster, difference))
         if len(all_clusters_which_satisfy_threshold) == 0:  # 没有找到相似的 cluster, 则新建一个 cluster
@@ -238,20 +221,23 @@ if __name__ == "__main__":
     # clusters = [[a] for a in areas]  # debug: 每个 symbol 仅由一个 area 合成
     print(f"对 {len(areas)} 个 Area, 产生了 {len(clusters)} 个 Cluster")
 
-    # 融合所有相似的 Area, 生成 Symbol
-    symbol_table: list[Symbol] = []     # 下标 [i] 的 Symbol 具有隐式的 idx=i
-    UPSCALE_BEFORE_MERGE = 2            # 多个 Area 融合成 Symbol 前使用的超采样倍率
-    # 对于每个 Cluster: 将其中包含的 Areas 合并为一个 Symbol, 并让这些 Areas 统统指向这个 Symbol
-    for similar_areas in clusters:
+    # 融合每个 Cluster 中的 Areas, 生成 Symbol, 并让这些 Areas 都指向这个 Symbol
+    symbol_table: list[Symbol] = []     # 下标 [i] 的 Symbol 必有 idx == i
+    UPSCALE_BEFORE_MERGE = 1            # 多个 Area 融合成 Symbol 前使用的超采样倍率
+    for clu in clusters:
         # 根据相似的 Area 制作 Symbol
-        grey_mask, cx, cy = centroids_aligned_mean(similar_areas, upscale=UPSCALE_BEFORE_MERGE)
-        symbol_table.append(Symbol(grey_mask=grey_mask, cx=cx, cy=cy))
-        for area in similar_areas:
-            area.symbol_id = len(symbol_table) - 1
+        new_symbol_idx = len(symbol_table)
+        grey_mask, cx, cy = centroids_aligned_mean(clu.areas, upscale=UPSCALE_BEFORE_MERGE)
+        symbol_table.append(Symbol(idx=new_symbol_idx, grey_mask=grey_mask, cx=cx, cy=cy, nr_areas_merged=len(clu.areas), area_ids=[area.idx for area in clu.areas]))
+        for area in clu.areas:
+            area.symbol_id = new_symbol_idx
+
+    # Debug: 输出所有的 symbol
+    [cv2.imwrite(f"result/symbol_nr={sym.debug_nr_areas_merged}_{sym.debug_area_ids[:3]}_id={sym.idx}.png", sym.grey_mask) for sym in symbol_table]
 
     # 构建一个 upscale 的空白图片, 把每个符号都放到这个图片上.
     new_img = np.zeros(shape=[UPSCALE_BEFORE_MERGE * grey_img.shape[0], UPSCALE_BEFORE_MERGE * grey_img.shape[1]])
-    for area in tqdm(areas):
+    for area in tqdm(areas, desc="将所有的 Symbol 绘制到新的图片上"):
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
         cx_should_be = upscaled_coord(area.cx + area.x, UPSCALE_BEFORE_MERGE)
