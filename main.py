@@ -14,6 +14,8 @@ class Area:
 
 # 符号类
 class Symbol:
+    # 每个符号由 (grey_mask, cx, cy) 表征, 其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子,
+    # 因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
     __slots__ = ["grey_mask", "cx", "cy"]
     def __init__(s, *, grey_mask, cx, cy):
         (s.grey_mask, s.cx, s.cy) = (grey_mask, cx, cy)
@@ -24,33 +26,32 @@ class Cluster:
     def __init__(self, first_area: Area):
         self.areas = [first_area, ]                     # Cluster 中的 area 应该是相似的
         self.do_not_try_merge = (first_area.feat_mat is None)
-        if not self.do_not_try_merge:
+        if (not self.do_not_try_merge) and (not USE_LEADER_MODE):
             self._w__sum = first_area.w
             self._h__sum = first_area.h
             self._mass__sum = first_area.mass
             self._feat_mat__sum = first_area.feat_mat.copy()    # 这里必须 copy!! 否则会导致后续的 append_area 会修改到 first_area.feat_mat
             self._feat_mass__sum = first_area.feat_mass         # 注意区分 feat_mass 和 mass!! 前者是 sum(feat_mat), 后者是 sum(grey_mask)
 
-    def get_average_area(self) -> Area:
-        # return self.areas[0]    # debug: 模拟之前的 "leader" 模式, 即返回第一个 area 作为整个 cluster 的代表
-        # 返回一个虚拟的 areas (仅有 feature 部分非 None), 其 feature 是当前 Cluster 的 areas 的 feature 的平均值
+    def get_leader(self) -> Area:
         n = len(self.areas)
-        if n == 1:
-            return self.areas[0]    # 优化加速
-        return Area(w=self._w__sum / n, h=self._h__sum / n, mass=self._mass__sum / n,
-                    feat_mat=self._feat_mat__sum / n, feat_mass=self._feat_mass__sum / n)
+        if USE_LEADER_MODE:
+            return self.areas[0]
+        elif n == 1:    # 优化加速
+            return self.areas[0]
+        else:           # 返回一个虚拟的 areas (仅有 feature 部分非 None), 其 feature 是当前 Cluster 的 areas 的 feature 的平均值
+            return Area(w=self._w__sum / n, h=self._h__sum / n, mass=self._mass__sum / n, feat_mat=self._feat_mat__sum / n, feat_mass=self._feat_mass__sum / n)
 
     def append_area(self, area: Area):
         self.areas.append(area)
-        self._feat_mat__sum += area.feat_mat
-        self._w__sum += area.w
-        self._h__sum += area.h
-        self._mass__sum += area.mass
+        if not USE_LEADER_MODE:
+            self._feat_mat__sum += area.feat_mat
+            self._w__sum += area.w
+            self._h__sum += area.h
+            self._mass__sum += area.mass
 
     def __iter__(self):
         return iter(self.areas)
-
-
 
 # 计算质心
 def calc_centroid(mat: np.ndarray) -> np.ndarray:
@@ -117,15 +118,15 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     return can
 
 # 在高分辨率下, 将若干个区域的 centroid 对齐
-def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_least_debug_prompt: int = 0, canvas_w_at_least_debug_prompt: int = 0) -> (np.ndarray, float, float):
+def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_least_prompt: int = 0, canvas_w_at_least_prompt: int = 0) -> (np.ndarray, float, float):
     # Note: 目前的实现方式是 先双线性超采样, 然后再移动. 这样涉及两次近似. todo: 可以基于 cv2.remap 实现成仅需一次近似.
     # 以下会自行决定合适的 canvas 尺寸以保证能容纳所有重心对齐的 areas,
-    # 但用户可以通过 canvas_h_at_least_debug_prompt 和 canvas_w_at_least_debug_prompt 来指定最小尺寸. (Debug 用)
+    # 但用户可以通过 canvas_h_at_least_prompt 和 canvas_w_at_least_prompt 来指定最小尺寸. (Debug 用)
     assert upscale > 0 and upscale % 1 == 0
     canvas_h = int(max(max(a.cy, a.h - a.cy) for a in areas) + 3) * 2 * upscale     # +3: 留出余量空间
     canvas_w = int(max(max(a.cx, a.w - a.cx) for a in areas) + 3) * 2 * upscale
-    if canvas_h < canvas_h_at_least_debug_prompt: canvas_h = canvas_h_at_least_debug_prompt  # Debug
-    if canvas_w < canvas_w_at_least_debug_prompt: canvas_w = canvas_w_at_least_debug_prompt  # Debug
+    if canvas_h < canvas_h_at_least_prompt: canvas_h = canvas_h_at_least_prompt  # 如果小于用户指定的最小尺寸, 则扩大到这个尺寸
+    if canvas_w < canvas_w_at_least_prompt: canvas_w = canvas_w_at_least_prompt  # 如果小于用户指定的最小尺寸, 则扩大到这个尺寸
     all_canvas = np.array([move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a, upscale, canvas_w, canvas_h) for a in areas])
     return np.mean(all_canvas, axis=0), (canvas_w-1) / 2, (canvas_h-1) / 2
 
@@ -146,7 +147,7 @@ def test_centroids_aligned_mean():
 
 # 传入一个 area, 计算 feature_vector
 def calc_feat_mat(area: Area) -> np.ndarray:
-    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_debug_prompt=80, canvas_w_at_least_debug_prompt=80)[0]
+    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_prompt=80, canvas_w_at_least_prompt=80)[0]
     feat_mat = cv2.resize(feat_mat, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_LINEAR)
     feat_mat = np.sqrt(feat_mat) / np.sqrt(255) * 255  # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
     feat_mat = cv2.GaussianBlur(feat_mat, (3, 3), 0)
@@ -209,10 +210,11 @@ if __name__ == "__main__":
             print(f"area_{area.idx} 的尺寸较大, feat_mat 超出 20*20, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
 
     # 将相似的 Area 聚类到一起
+    USE_LEADER_MODE = True          # 如果使用 "leader" 模式, 那么总是返回第一个 area 作为整个 cluster 的代表
+    DIFFERENCE_THRESHOLD = 0.20     # 差异度阈值: diff ∈ [0, 1], 0: 完全重叠, 1: 完全不重叠.
+    SHAPE_RATIO_THRESHOLD = 0.7     # 边长比例阈值: 仅用于加速, 筛掉明显不匹配的
+    MASS_RATIO_THRESHOLD = 0.7      # 灰度面积阈值: 仅用于加速, 筛掉明显不匹配的
     clusters: list[Cluster] = []
-    difference_threshold = 0.25         # 差异度阈值: diff ∈ [0, 1], 0: 完全重叠, 1: 完全不重叠.
-    shape_ratio_threshold = 0.7         # 边长比例阈值: 仅用于加速, 筛掉明显不匹配的
-    mass_ratio_threshold = 0.7          # 灰度面积阈值: 仅用于加速, 筛掉明显不匹配的
     for area in tqdm(areas):
         if area.feat_mat is None:           # 不参与合并的大图案
             clusters.append(Cluster(area))  # 作为一个独立的 cluster
@@ -220,11 +222,11 @@ if __name__ == "__main__":
         all_clusters_which_satisfy_threshold: list[tuple[Cluster, float]] = []   # 所有满足阈值的 cluster, 以及其与 area 的差异度, (最后会从中选出最相似的那个 Cluster)
         for cluster in clusters:
             if cluster.do_not_try_merge: continue
-            cluster_leader: Area = cluster.get_average_area()
-            if not (shape_ratio_threshold <= (area.h / cluster_leader.h) <= 1 / shape_ratio_threshold): continue        # 高度差太多, 直接否决
-            if not (shape_ratio_threshold <= (area.w / cluster_leader.w) <= 1 / shape_ratio_threshold): continue        # 宽度差太多, 直接否决
-            if not (mass_ratio_threshold <= (area.mass / cluster_leader.mass) <= 1 / mass_ratio_threshold): continue    # 面积差太多, 直接否决
-            if (difference := calc_feat_diff(area, cluster_leader)) < difference_threshold:     # 差异度小于阈值, 加入
+            cluster_leader: Area = cluster.get_leader()
+            if not (SHAPE_RATIO_THRESHOLD <= (area.h / cluster_leader.h) <= 1 / SHAPE_RATIO_THRESHOLD): continue        # 高度差太多, 直接否决
+            if not (SHAPE_RATIO_THRESHOLD <= (area.w / cluster_leader.w) <= 1 / SHAPE_RATIO_THRESHOLD): continue        # 宽度差太多, 直接否决
+            if not (MASS_RATIO_THRESHOLD <= (area.mass / cluster_leader.mass) <= 1 / MASS_RATIO_THRESHOLD): continue    # 面积差太多, 直接否决
+            if (difference := calc_feat_diff(area, cluster_leader)) < DIFFERENCE_THRESHOLD:     # 差异度小于阈值, 加入
                 all_clusters_which_satisfy_threshold.append((cluster, difference))
         if len(all_clusters_which_satisfy_threshold) == 0:  # 没有找到相似的 cluster, 则新建一个 cluster
             clusters.append(Cluster(area))
@@ -233,30 +235,27 @@ if __name__ == "__main__":
             most_similar_cluster = all_clusters_which_satisfy_threshold[0][0]
             most_similar_cluster.append_area(area)
 
+    # clusters = [[a] for a in areas]  # debug: 每个 symbol 仅由一个 area 合成
     print(f"对 {len(areas)} 个 Area, 产生了 {len(clusters)} 个 Cluster")
 
-    # 创建 symbol_table, 每个 area 的 symbol_id 指向某个符号, 这个符号由 (grey_mask, cx, cy) 表征 (其中 cx, cy 如果是 centroid() 融合而成的, 那应该都是 int + 0.5 的样子, 因为 2x 超分后 canvas 是偶数边长的, 又因为 centroid() 返回的 area 是 centroid 中心化的).
-    symbol_table: list[Symbol] = []
-
-    # 多帧融合时使用的超采样倍率
-    upscale = 1
-
-    # clusters = [[a] for a in areas]  # debug: 每个 symbol 仅由一个 area 合成
+    # 融合所有相似的 Area, 生成 Symbol
+    symbol_table: list[Symbol] = []     # 下标 [i] 的 Symbol 具有隐式的 idx=i
+    UPSCALE_BEFORE_MERGE = 2            # 多个 Area 融合成 Symbol 前使用的超采样倍率
     # 对于每个 Cluster: 将其中包含的 Areas 合并为一个 Symbol, 并让这些 Areas 统统指向这个 Symbol
     for similar_areas in clusters:
         # 根据相似的 Area 制作 Symbol
-        grey_mask, cx, cy = centroids_aligned_mean(similar_areas, upscale=upscale)
+        grey_mask, cx, cy = centroids_aligned_mean(similar_areas, upscale=UPSCALE_BEFORE_MERGE)
         symbol_table.append(Symbol(grey_mask=grey_mask, cx=cx, cy=cy))
         for area in similar_areas:
             area.symbol_id = len(symbol_table) - 1
 
-    # 构建一个 4x 大的空白图片, 把每个符号都放到这个图片上.
-    new_img = np.zeros(shape=[upscale * grey_img.shape[0], upscale * grey_img.shape[1]])
+    # 构建一个 upscale 的空白图片, 把每个符号都放到这个图片上.
+    new_img = np.zeros(shape=[UPSCALE_BEFORE_MERGE * grey_img.shape[0], UPSCALE_BEFORE_MERGE * grey_img.shape[1]])
     for area in tqdm(areas):
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
-        cx_should_be = upscaled_coord(area.cx + area.x, upscale)
-        cy_should_be = upscaled_coord(area.cy + area.y, upscale)
+        cx_should_be = upscaled_coord(area.cx + area.x, UPSCALE_BEFORE_MERGE)
+        cy_should_be = upscaled_coord(area.cy + area.y, UPSCALE_BEFORE_MERGE)
         # 计算 symbol 在与 new_img 左上角对齐时, 还需要移动多少距离才能使得重心对齐 c_should_be
         should_move_x = cx_should_be - symbol.cx
         should_move_y = cy_should_be - symbol.cy
