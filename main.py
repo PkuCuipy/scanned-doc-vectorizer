@@ -126,10 +126,11 @@ def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_l
 
 
 # 传入一个 area, 计算 feature_vector
+FEAT_MAT_SIZE = 30 * 4     # fixme: 超参数, 且请确保是 4 的倍数, 因为下面要用到 4x4 的低通滤波
+print("FEAT_MAT_SIZE =", FEAT_MAT_SIZE)
 def calc_feat_mat(area: Area) -> Union[np.ndarray, None]:
-    PROMPT_CANVAS_SIZE = 20 * 4     # fixme: 超参数, 且请确保是 4 的倍数, 因为下面要用到 4x4 的低通滤波
-    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_prompt=PROMPT_CANVAS_SIZE, canvas_w_at_least_prompt=PROMPT_CANVAS_SIZE)[0]
-    if feat_mat.shape != (PROMPT_CANVAS_SIZE, PROMPT_CANVAS_SIZE):
+    feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_prompt=FEAT_MAT_SIZE, canvas_w_at_least_prompt=FEAT_MAT_SIZE)[0]
+    if feat_mat.shape != (FEAT_MAT_SIZE, FEAT_MAT_SIZE):
         return None  # 这个 area 的尺寸很大, 认为分辨率已足够大, 无需合并超分辨率
     feat_mat = np.mean(feat_mat.reshape((feat_mat.shape[0] // 4, 4, feat_mat.shape[1] // 4, 4)), axis=(1, 3))    # (4h, 4w) -> (h, w) 低通滤波. (cv2.resize 会导致小像素蜜汁消失, 不懂为啥, 总之弃用)
     # feat_mat = (feat_mat ** (1/2)) / (255 ** (1/2)) * 255   # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
@@ -141,6 +142,32 @@ def calc_feat_diff(a1: Area, a2: Area) -> float:
     # 目前差异度 (difference) 定义为: sum(|A-B|) / (sum(A)+sum(B)), 有种 diff-over-union 的感觉
     return np.sum(np.abs(a1.feat_mat - a2.feat_mat)) / ((a1.feat_mass + a2.feat_mass) / 2)
     # return np.sqrt(np.sum(np.square(a1.feat_mat - a2.feat_mat))) / ((a1.feat_mass + a2.feat_mass) / 2)
+
+# 将一个 pattern 绘制在 canvas 上, 使得 pattern 上的某个坐标点与 canvas 的指定坐标点重合
+def place_pattern_on_canvas(pattern: np.ndarray, pattern_cx: float, pattern_cy: float, placement_cx: float, placement_cy: float, canvas: np.ndarray) -> None:
+    patH, patW = pattern.shape
+    canH, canW = canvas.shape
+    # 计算 pattern 在与 canvas 的 (0, 0) 对齐时, 需要再移动多少距离才能使得 [重心] 对齐
+    dx = placement_cx - pattern_cx
+    dy = placement_cy - pattern_cy
+    # 将移动量拆成整数和浮点两部分, 整数部分用索引解决, 浮点部分用 move_subpixel() 解决
+    dx_int, dx_f32 = float_split(dx)
+    dy_int, dy_f32 = float_split(dy)
+    # 浮点移动 (这不会影响 pattern 的 shape)
+    pattern_refined = move_img_subpixel(pattern, dx_f32, dy_f32)
+    # 整数移动:
+    #  1. 计算移动后的 pattern 在 canvas 上的范围
+    i_beg, i_end = dy_int, (dy_int + patH)
+    j_beg, j_end = dx_int, (dx_int + patW)
+    #  2. 这个范围需要修正到 canvas 的边界范围之内 (i.e. 0 ≤ start ≤ end < len)
+    i_beg_incr, i_end_decr, j_beg_incr, j_end_decr = 0, 0, 0, 0  # 默认不裁剪, 即默认为 0
+    if i_beg < 0:    (i_beg, i_beg_incr) = (0, 0 - i_beg)
+    if i_end > canH: (i_end, i_end_decr) = (canH, i_end - canH)
+    if j_beg < 0:    (j_beg, j_beg_incr) = (0, 0 - j_beg)
+    if j_end > canW: (j_end, j_end_decr) = (canW, j_end - canW)
+    #  3. 将 pattern_refined 的指定范围, 覆盖到 canvas 的指定范围
+    canvas[i_beg: i_end, j_beg: j_end] += pattern_refined[i_beg_incr: patH - i_end_decr, j_beg_incr: patW - j_end_decr]
+
 
 # ======================================================================================================================
 
@@ -154,7 +181,8 @@ if __name__ == "__main__":
     plt.rcParams["figure.figsize"] = (13, 9)
 
     # 读入图片, 转为灰度图, 然后二值化
-    grey_img = np.array(cv2.imread("data/test_14.png", cv2.IMREAD_GRAYSCALE))
+    grey_img = np.array(cv2.imread("data/test_7.png", cv2.IMREAD_GRAYSCALE))
+    # grey_img = np.array(cv2.imread("data/scanfile/grey-150.png", cv2.IMREAD_GRAYSCALE))
     grey_img = cv2.resize(grey_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
     bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
     # plt.imshow(bin_img, cmap="gray")
@@ -182,15 +210,16 @@ if __name__ == "__main__":
         # cv2.imwrite(f"result/{area.idx}.png", area.grey_mask)   # 保存图片
     plt.show()
 
-    # 为每个 Area 计算 feature (目前用一个 20*20 的矩阵来表征)
+    # 为每个 Area 计算 feature_mat
+    debug_no_feat_area_indices = [] # debug: 记录没有 feat_mat 的 area 的 idx
     for area in tqdm(areas, desc="为每个 Area 计算 feat_mat"):
         area.feat_mat = calc_feat_mat(area)
         if area.feat_mat is not None:
             area.feat_mass = np.sum(area.feat_mat)
-            # cv2.imwrite(f"result/{area.idx}.png", feat_mat)   # 打印 feature_mat (20 x 20)
+            # cv2.imwrite(f"result/{area.idx}.png", area.feat_mat)   # 打印 feature_mat
         else:
-            # print(f"area_{area.idx} 的尺寸较大, feat_mat 超出 20*20, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
-            pass
+            debug_no_feat_area_indices.append(area.idx)
+    print(f"area: {debug_no_feat_area_indices} (len={len(debug_no_feat_area_indices)}) 的尺寸较大, feat_mat 超出 prompt_size, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
 
     # 将相似的 Area 聚类到一起
     USE_LEADER_MODE = True          # 如果使用 "leader" 模式, 那么总是返回第一个 area 作为整个 cluster 的代表
@@ -217,13 +246,11 @@ if __name__ == "__main__":
             all_clusters_which_satisfy_threshold.sort(key=lambda x: x[1])
             most_similar_cluster = all_clusters_which_satisfy_threshold[0][0]
             most_similar_cluster.append_area(area)
-
-    # clusters = [[a] for a in areas]  # debug: 每个 symbol 仅由一个 area 合成
     print(f"对 {len(areas)} 个 Area, 产生了 {len(clusters)} 个 Cluster")
 
     # 融合每个 Cluster 中的 Areas, 生成 Symbol, 并让这些 Areas 都指向这个 Symbol
     symbol_table: list[Symbol] = []     # 下标 [i] 的 Symbol 必有 idx == i
-    UPSCALE_BEFORE_MERGE = 1            # 多个 Area 融合成 Symbol 前使用的超采样倍率
+    UPSCALE_BEFORE_MERGE = 2            # 多个 Area 融合成 Symbol 前使用的超采样倍率
     for clu in clusters:
         # 根据相似的 Area 制作 Symbol
         new_symbol_idx = len(symbol_table)
@@ -242,22 +269,10 @@ if __name__ == "__main__":
         # 计算原 area 的重心在新图片上的位置
         cx_should_be = upscaled_coord(area.cx + area.x, UPSCALE_BEFORE_MERGE)
         cy_should_be = upscaled_coord(area.cy + area.y, UPSCALE_BEFORE_MERGE)
-        # 计算 symbol 在与 new_img 左上角对齐时, 还需要移动多少距离才能使得重心对齐 c_should_be
-        should_move_x = cx_should_be - symbol.cx
-        should_move_y = cy_should_be - symbol.cy
-        # 将偏移量拆成整数和浮点两部分, 整数部分用索引解决, 浮点部分用 move_subpixel() 解决
-        should_move_x_int, should_move_x_f32 = float_split(should_move_x)
-        should_move_y_int, should_move_y_f32 = float_split(should_move_y)
-        # 浮点移动
-        symbol_refined = move_img_subpixel(symbol.grey_mask, should_move_x_f32, should_move_y_f32)
-        # 整数移动 (由于可能越界, 目前用 except 忽略潜在的错误)
-        try:
-            new_img[should_move_y_int: should_move_y_int + symbol_refined.shape[0],
-                    should_move_x_int: should_move_x_int + symbol_refined.shape[1]] += symbol_refined
-        except Exception as e:
-            print(e)
+        # 将 Symbol 绘制在新图片的指定坐标处
+        place_pattern_on_canvas(symbol.grey_mask, symbol.cx, symbol.cy, cx_should_be, cy_should_be, new_img)
 
-    cv2.imwrite("result/new_img.png", (255-new_img).astype(np.uint8))
+    cv2.imwrite("result/new_img.png", (255 - new_img).clip(0, 255).astype(np.uint8))
     plt.imshow(new_img)
     plt.show()
 
