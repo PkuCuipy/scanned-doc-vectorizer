@@ -6,6 +6,7 @@ import os
 from tqdm import trange, tqdm
 from typing import Iterable, Union
 import datetime
+import svgwrite.path
 
 # 区域类
 class Area:
@@ -125,7 +126,6 @@ def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_l
     all_canvas = np.array([move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a, upscale, canvas_w, canvas_h) for a in areas])
     return np.mean(all_canvas, axis=0), (canvas_w-1) / 2, (canvas_h-1) / 2
 
-
 # 传入一个 area, 计算 feature_vector
 FEAT_MAT_SIZE = 30 * 4     # fixme: 超参数, 且请确保是 4 的倍数, 因为下面要用到 4x4 的低通滤波
 print("FEAT_MAT_SIZE =", FEAT_MAT_SIZE)
@@ -169,18 +169,17 @@ def place_pattern_on_canvas(pattern: np.ndarray, pattern_cx: float, pattern_cy: 
     #  3. 将 pattern_refined 的指定范围, 覆盖到 canvas 的指定范围
     canvas[i_beg: i_end, j_beg: j_end] += pattern_refined[i_beg_incr: patH - i_end_decr, j_beg_incr: patW - j_end_decr]
 
-
 # ======================================================================================================================
 
 if __name__ == "__main__":
 
     # 创建存放结果的文件夹
-    RESULT_FOLDER = f"result/{datetime.datetime.now().strftime('%H.%M.%S')}"
+    __ROOT_FOLDER = ["/Users/cuipy/NoBackup", "."][0]
+    RESULT_FOLDER = f"{__ROOT_FOLDER}/result/result_{datetime.datetime.now().strftime('%Y-%m-%d(%H.%M.%S)')}"
     AREA_FOLDER = f"{RESULT_FOLDER}/areas"
     FEAT_FOLDER = f"{RESULT_FOLDER}/feat_mats"
     SYMBOL_FOLDER = f"{RESULT_FOLDER}/symbols"
-    if not os.path.exists("result"): os.mkdir("result")
-    if not os.path.exists(RESULT_FOLDER): os.mkdir(RESULT_FOLDER)
+    if not os.path.exists(RESULT_FOLDER): os.makedirs(RESULT_FOLDER)
     if not os.path.exists(AREA_FOLDER): os.mkdir(AREA_FOLDER)
     if not os.path.exists(FEAT_FOLDER): os.mkdir(FEAT_FOLDER)
     if not os.path.exists(SYMBOL_FOLDER): os.mkdir(SYMBOL_FOLDER)
@@ -189,7 +188,7 @@ if __name__ == "__main__":
     plt.rcParams["figure.figsize"] = (13, 9)
 
     # 读入图片, 转为灰度图, 然后二值化
-    grey_img = np.array(cv2.imread("data/test_7.png", cv2.IMREAD_GRAYSCALE))
+    grey_img = np.array(cv2.imread("data/test_6.png", cv2.IMREAD_GRAYSCALE))
     # grey_img = np.array(cv2.imread("data/scanfile/grey-150.png", cv2.IMREAD_GRAYSCALE))
     grey_img = cv2.resize(grey_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
     bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
@@ -258,11 +257,11 @@ if __name__ == "__main__":
 
     # 融合每个 Cluster 中的 Areas, 生成 Symbol, 并让这些 Areas 都指向这个 Symbol
     symbol_table: list[Symbol] = []     # 下标 [i] 的 Symbol 必有 idx == i
-    UPSCALE_BEFORE_MERGE = 2            # 多个 Area 融合成 Symbol 前使用的超采样倍率
+    UPSCALE_AREA_2_SYMBOL = 2           # 多个 Area 融合成 Symbol 前使用的超采样倍率
     for clu in clusters:
         # 根据相似的 Area 制作 Symbol
         new_symbol_idx = len(symbol_table)
-        grey_mask, cx, cy = centroids_aligned_mean(clu.areas, upscale=UPSCALE_BEFORE_MERGE)
+        grey_mask, cx, cy = centroids_aligned_mean(clu.areas, upscale=UPSCALE_AREA_2_SYMBOL)
         symbol_table.append(Symbol(idx=new_symbol_idx, grey_mask=grey_mask, cx=cx, cy=cy, nr_areas_merged=len(clu.areas), area_ids=[area.idx for area in clu.areas]))
         for area in clu.areas:
             area.symbol_id = new_symbol_idx
@@ -271,35 +270,69 @@ if __name__ == "__main__":
     [cv2.imwrite(f"{SYMBOL_FOLDER}/nr={sym.debug_nr_areas_merged}_areas={sym.debug_area_ids[:3]}_sid={sym.idx}.png", sym.grey_mask) for sym in symbol_table]
 
     # 构建一个 upscale 的空白图片, 把每个符号都放到这个图片上.
-    new_img = np.zeros(shape=[UPSCALE_BEFORE_MERGE * grey_img.shape[0], UPSCALE_BEFORE_MERGE * grey_img.shape[1]])
+    new_img = np.zeros(shape=[UPSCALE_AREA_2_SYMBOL * grey_img.shape[0], UPSCALE_AREA_2_SYMBOL * grey_img.shape[1]])
     for area in tqdm(areas, desc="将所有的 Symbol 绘制到新的图片上"):
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
-        cx_should_be = upscaled_coord(area.cx + area.x, UPSCALE_BEFORE_MERGE)
-        cy_should_be = upscaled_coord(area.cy + area.y, UPSCALE_BEFORE_MERGE)
+        cx_should_be = upscaled_coord(area.cx + area.x, UPSCALE_AREA_2_SYMBOL)
+        cy_should_be = upscaled_coord(area.cy + area.y, UPSCALE_AREA_2_SYMBOL)
         # 将 Symbol 绘制在新图片的指定坐标处
         place_pattern_on_canvas(symbol.grey_mask, symbol.cx, symbol.cy, cx_should_be, cy_should_be, new_img)
 
     # 保存 SR 结果
+    UPSCALE_GREY_2_BINARY = 2  # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大
     SR_img = (255 - new_img).clip(0, 255)
     cv2.imwrite(f"{RESULT_FOLDER}/SR.png", SR_img)
-    cv2.imwrite(f"{RESULT_FOLDER}/SR_binarize.png", cv2.threshold(
-        cv2.resize(SR_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR), # 先放大两倍, 再二值化
-        127, 255, cv2.THRESH_BINARY)[1])
+    cv2.imwrite(f"{RESULT_FOLDER}/SR_binarize.png", cv2.threshold(cv2.resize(SR_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1])
 
-    # TODO: 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
+    # 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
+    # 构建一个 SVG 画布
+    drawing = svgwrite.Drawing('example.svg', size=(SR_img.shape[1], SR_img.shape[0]))
+    drawing.elements = []   # 清空该 .svg 文件的原有内容
+    drawing.viewbox(-0.5, -0.5, SR_img.shape[1] + 0.5, SR_img.shape[0] + 0.5)
 
+    # 为每个 Symbol 构建 <path>, 然后注册为 <symbol>
+    for sym in symbol_table:
+        # 使用 cv2.findContours() 提取轮廓
+        sym_grey = sym.grey_mask
+        sym_bin = cv2.threshold(cv2.resize(sym_grey, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1]
+        cx, cy = upscaled_coord(sym.cx, 2), upscaled_coord(sym.cy, 2)
+        contours, hierarchy = cv2.findContours(image=sym_bin.astype("u1"), mode=cv2.RETR_CCOMP, # RETR_CCOMP: 提取两层级的轮廓 (0 层级是外轮廓, 1 层级是内轮廓)
+                                               method=cv2.CHAIN_APPROX_TC89_KCOS)               # method 是减少顶点数量选用的算法
+        # 构建绘制指令序列
+        path_cmds: list[str] = []
+        for contour in contours:                        # 比如 `器` 字包含 5 个 contour
+            points = contour.squeeze(1)                 # dim=1 恒为 1, 这是来自 C++ 的兼容性设计
+            points = points / UPSCALE_GREY_2_BINARY     # 由于是在放大的图片上提取的轮廓, 所以需要缩小回来
+            path_cmds.append("M")                       # M x0,y0  L x1,y1  L x2,y2  ...  Z
+            for i, point in enumerate(points):
+                path_cmds.append(f"{point[0]},{point[1]}")
+                if i != len(points) - 1:
+                    path_cmds.append("L")
+            path_cmds.append("Z")
 
+        # 如果有绘制指令, 则构建 <path> 并注册为 <symbol>
+        if path_cmds:
+            # 构建 <path>
+            path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill='black', stroke='white')
+            # 注册 <symbol>
+            symbol_elem = drawing.symbol(id=f"symbol_{sym.idx}")    # 注意这里不加 `#` 前缀!
+            symbol_elem.add(path_elem)
+            drawing.add(symbol_elem)
+        else:
+            print(f"DEBUG: Symbol {sym.idx} 不存在绘制指令!")
 
+    # 对于每个 Area, 使用 <use> 引用其对应的 <symbol>
+    for area in tqdm(areas, desc="将每个 Area 用 <use> 引用其对应的 <symbol>"):
+        sid: int = area.symbol_id
+        sym: Symbol = symbol_table[sid]
+        insert_x = upscaled_coord(area.x + area.cx, UPSCALE_AREA_2_SYMBOL) - sym.cx
+        insert_y = upscaled_coord(area.y + area.cy, UPSCALE_AREA_2_SYMBOL) - sym.cy
+        use_elem = drawing.use(f"#symbol_{area.symbol_id}", insert=(insert_x, insert_y))     # 注意这里要加 `#` 前缀!
+        drawing.add(use_elem)
 
-
-
-
-
-
-
-
-
+    # 保存 SVG
+    drawing.save(pretty=True)
 
 
 
