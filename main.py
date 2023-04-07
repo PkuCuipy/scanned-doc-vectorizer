@@ -323,7 +323,7 @@ if __name__ == "__main__":
         # 如果有绘制指令, 则构建 <path> 并注册为 <symbol>
         if path_cmds:
             # 构建 <path>
-            path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill='black', stroke='white')
+            path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill='black')
             save_path_to_svg_file(path_elem, [sym.grey_mask.shape[1], sym.grey_mask.shape[0]] , f"{SVG_FOLDER}/symbol_{sym.idx}.svg")
             # 注册 <symbol>
             symbol_elem = drawing.symbol(id=f"symbol_{sym.idx}")    # 注意这里不加 `#` 前缀!
