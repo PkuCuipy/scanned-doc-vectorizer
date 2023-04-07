@@ -169,6 +169,12 @@ def place_pattern_on_canvas(pattern: np.ndarray, pattern_cx: float, pattern_cy: 
     #  3. 将 pattern_refined 的指定范围, 覆盖到 canvas 的指定范围
     canvas[i_beg: i_end, j_beg: j_end] += pattern_refined[i_beg_incr: patH - i_end_decr, j_beg_incr: patW - j_end_decr]
 
+# 保存单独一个 <path> 到 .svg 文件
+def save_path_to_svg_file(path_elem, svg_size, svg_filename: str) -> None:
+    dwg = svgwrite.Drawing(filename=svg_filename, size=svg_size)
+    dwg.add(path_elem)
+    dwg.save(pretty=True)
+
 # ======================================================================================================================
 
 if __name__ == "__main__":
@@ -179,10 +185,12 @@ if __name__ == "__main__":
     AREA_FOLDER = f"{RESULT_FOLDER}/areas"
     FEAT_FOLDER = f"{RESULT_FOLDER}/feat_mats"
     SYMBOL_FOLDER = f"{RESULT_FOLDER}/symbols"
+    SVG_FOLDER = f"{RESULT_FOLDER}/svg"
     if not os.path.exists(RESULT_FOLDER): os.makedirs(RESULT_FOLDER)
     if not os.path.exists(AREA_FOLDER): os.mkdir(AREA_FOLDER)
     if not os.path.exists(FEAT_FOLDER): os.mkdir(FEAT_FOLDER)
     if not os.path.exists(SYMBOL_FOLDER): os.mkdir(SYMBOL_FOLDER)
+    if not os.path.exists(SVG_FOLDER): os.mkdir(SVG_FOLDER)
 
     # 设置 plt 窗口大小
     plt.rcParams["figure.figsize"] = (13, 9)
@@ -287,11 +295,12 @@ if __name__ == "__main__":
 
     # 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
     # 构建一个 SVG 画布
-    drawing = svgwrite.Drawing('example.svg', size=(SR_img.shape[1], SR_img.shape[0]))
+    drawing = svgwrite.Drawing(f"{RESULT_FOLDER}/output.svg", size=(SR_img.shape[1], SR_img.shape[0]))
     drawing.elements = []   # 清空该 .svg 文件的原有内容
     drawing.viewbox(-0.5, -0.5, SR_img.shape[1] + 0.5, SR_img.shape[0] + 0.5)
 
     # 为每个 Symbol 构建 <path>, 然后注册为 <symbol>
+    debug_no_cmd_symbol_indices = []
     for sym in symbol_table:
         # 使用 cv2.findContours() 提取轮廓
         sym_grey = sym.grey_mask
@@ -315,12 +324,14 @@ if __name__ == "__main__":
         if path_cmds:
             # 构建 <path>
             path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill='black', stroke='white')
+            save_path_to_svg_file(path_elem, [sym.grey_mask.shape[1], sym.grey_mask.shape[0]] , f"{SVG_FOLDER}/symbol_{sym.idx}.svg")
             # 注册 <symbol>
             symbol_elem = drawing.symbol(id=f"symbol_{sym.idx}")    # 注意这里不加 `#` 前缀!
             symbol_elem.add(path_elem)
             drawing.add(symbol_elem)
         else:
-            print(f"DEBUG: Symbol {sym.idx} 不存在绘制指令!")
+            debug_no_cmd_symbol_indices.append(sym.idx)
+    print(f"Symbol: {debug_no_cmd_symbol_indices} (len={len(debug_no_cmd_symbol_indices)}) 不存在绘制指令!")
 
     # 对于每个 Area, 使用 <use> 引用其对应的 <symbol>
     for area in tqdm(areas, desc="将每个 Area 用 <use> 引用其对应的 <symbol>"):
@@ -333,12 +344,5 @@ if __name__ == "__main__":
 
     # 保存 SVG
     drawing.save(pretty=True)
-
-
-
-
-
-
-
-
+    drawing.saveas(f"./output(open_with_safari).svg", pretty=True)
 
