@@ -5,6 +5,7 @@ import cv2
 import os
 from tqdm import trange, tqdm
 from typing import Iterable, Union
+import datetime
 
 # 区域类
 class Area:
@@ -174,8 +175,15 @@ def place_pattern_on_canvas(pattern: np.ndarray, pattern_cx: float, pattern_cy: 
 if __name__ == "__main__":
 
     # 创建存放结果的文件夹
-    if not os.path.exists("result"):
-        os.mkdir("result")
+    RESULT_FOLDER = f"result/{datetime.datetime.now().strftime('%H.%M.%S')}"
+    AREA_FOLDER = f"{RESULT_FOLDER}/areas"
+    FEAT_FOLDER = f"{RESULT_FOLDER}/feat_mats"
+    SYMBOL_FOLDER = f"{RESULT_FOLDER}/symbols"
+    if not os.path.exists("result"): os.mkdir("result")
+    if not os.path.exists(RESULT_FOLDER): os.mkdir(RESULT_FOLDER)
+    if not os.path.exists(AREA_FOLDER): os.mkdir(AREA_FOLDER)
+    if not os.path.exists(FEAT_FOLDER): os.mkdir(FEAT_FOLDER)
+    if not os.path.exists(SYMBOL_FOLDER): os.mkdir(SYMBOL_FOLDER)
 
     # 设置 plt 窗口大小
     plt.rcParams["figure.figsize"] = (13, 9)
@@ -185,8 +193,8 @@ if __name__ == "__main__":
     # grey_img = np.array(cv2.imread("data/scanfile/grey-150.png", cv2.IMREAD_GRAYSCALE))
     grey_img = cv2.resize(grey_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
     bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
-    # plt.imshow(bin_img, cmap="gray")
-    # plt.show()
+    cv2.imwrite(f"{RESULT_FOLDER}/input.png", grey_img)
+    cv2.imwrite(f"{RESULT_FOLDER}/binarize.png", 255 - bin_img)
 
     # 提取所有的连通区域
     nr_labels, label_map, label_stats, label_centroids = cv2.connectedComponentsWithStats(bin_img, connectivity=8)    # fixme: 使用 4-连通, 尽可能缩小每个区域, 似乎更适合英文; 8-连通似乎适合中文
@@ -203,12 +211,12 @@ if __name__ == "__main__":
         areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_mask=grey_mask))
 
     # 绘制每个连通域
-    plt.imshow(label_map, cmap="jet")   # label_map 作为背景色, 绘制 bbox 于其上
+    # plt.imshow(label_map, cmap="jet")   # label_map 作为背景色, 绘制 bbox 于其上
     for area in tqdm(areas, desc="绘制每个连通域"):
-        plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
+        # plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
-        # cv2.imwrite(f"result/{area.idx}.png", area.grey_mask)   # 保存图片
-    plt.show()
+        cv2.imwrite(f"{AREA_FOLDER}/{area.idx}.png", area.grey_mask)   # 保存图片
+    # plt.show()
 
     # 为每个 Area 计算 feature_mat
     debug_no_feat_area_indices = [] # debug: 记录没有 feat_mat 的 area 的 idx
@@ -216,7 +224,7 @@ if __name__ == "__main__":
         area.feat_mat = calc_feat_mat(area)
         if area.feat_mat is not None:
             area.feat_mass = np.sum(area.feat_mat)
-            # cv2.imwrite(f"result/{area.idx}.png", area.feat_mat)   # 打印 feature_mat
+            cv2.imwrite(f"{FEAT_FOLDER}/{area.idx}.png", area.feat_mat)   # 打印 feature_mat
         else:
             debug_no_feat_area_indices.append(area.idx)
     print(f"area: {debug_no_feat_area_indices} (len={len(debug_no_feat_area_indices)}) 的尺寸较大, feat_mat 超出 prompt_size, 不予使用; 况且这说明其自身分辨率也足够大了, 不必尝试与其他合并")
@@ -260,7 +268,7 @@ if __name__ == "__main__":
             area.symbol_id = new_symbol_idx
 
     # Debug: 输出所有的 symbol
-    [cv2.imwrite(f"result/symbol_nr={sym.debug_nr_areas_merged}_{sym.debug_area_ids[:3]}_id={sym.idx}.png", sym.grey_mask) for sym in symbol_table]
+    [cv2.imwrite(f"{SYMBOL_FOLDER}/nr={sym.debug_nr_areas_merged}_areas={sym.debug_area_ids[:3]}_sid={sym.idx}.png", sym.grey_mask) for sym in symbol_table]
 
     # 构建一个 upscale 的空白图片, 把每个符号都放到这个图片上.
     new_img = np.zeros(shape=[UPSCALE_BEFORE_MERGE * grey_img.shape[0], UPSCALE_BEFORE_MERGE * grey_img.shape[1]])
@@ -272,11 +280,15 @@ if __name__ == "__main__":
         # 将 Symbol 绘制在新图片的指定坐标处
         place_pattern_on_canvas(symbol.grey_mask, symbol.cx, symbol.cy, cx_should_be, cy_should_be, new_img)
 
-    cv2.imwrite("result/new_img.png", (255 - new_img).clip(0, 255).astype(np.uint8))
-    plt.imshow(new_img)
-    plt.show()
+    # 保存 SR 结果
+    SR_img = (255 - new_img).clip(0, 255)
+    cv2.imwrite(f"{RESULT_FOLDER}/SR.png", SR_img)
+    cv2.imwrite(f"{RESULT_FOLDER}/SR_binarize.png", cv2.threshold(
+        cv2.resize(SR_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR), # 先放大两倍, 再二值化
+        127, 255, cv2.THRESH_BINARY)[1])
 
     # TODO: 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
+
 
 
 
