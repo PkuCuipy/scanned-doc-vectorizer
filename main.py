@@ -7,6 +7,7 @@ from tqdm import trange, tqdm
 from typing import Iterable, Union
 import datetime
 import svgwrite.path
+import potrace_utils
 
 # 区域类
 class Area:
@@ -135,7 +136,7 @@ def calc_feat_mat(area: Area) -> Union[np.ndarray, None]:
         return None  # 这个 area 的尺寸很大, 认为分辨率已足够大, 无需合并超分辨率
     feat_mat = np.mean(feat_mat.reshape((feat_mat.shape[0] // 4, 4, feat_mat.shape[1] // 4, 4)), axis=(1, 3))    # (4h, 4w) -> (h, w) 低通滤波. (cv2.resize 会导致小像素蜜汁消失, 不懂为啥, 总之弃用)
     # feat_mat = (feat_mat ** (1/2)) / (255 ** (1/2)) * 255   # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
-    feat_mat = cv2.GaussianBlur(feat_mat, (5, 5), sigmaX=0.7)    # 这个高斯模糊, 对于 test_9 效果很差, 因为会导致误合并; 但对于 test_14 效果很好, 因为否则很难匹配合并..
+    feat_mat = cv2.GaussianBlur(feat_mat, (5, 5), sigmaX=0.7)    # 这个高斯模糊, 对于 test9 效果很差, 因为会导致误合并; 但对于 test14 效果很好, 因为否则很难匹配合并..
     return feat_mat
 
 # 传入两个 area, 计算他们的 feature 差异度
@@ -172,6 +173,7 @@ def place_pattern_on_canvas(pattern: np.ndarray, pattern_cx: float, pattern_cy: 
 # 保存单独一个 <path> 到 .svg 文件
 def save_path_to_svg_file(path_elem, svg_size, svg_filename: str) -> None:
     dwg = svgwrite.Drawing(filename=svg_filename, size=svg_size)
+    dwg.add(dwg.rect(insert=(0, 0), size=svg_size, fill="white"))   # 垫一个矩形作为背景色
     dwg.add(path_elem)
     dwg.save(pretty=True)
 
@@ -196,11 +198,14 @@ if __name__ == "__main__":
     plt.rcParams["figure.figsize"] = (13, 9)
 
     # 读入图片, 转为灰度图, 然后二值化
+    UPSCALE_GREY_2_BINARY = 2  # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大
     grey_img = np.array(cv2.imread("data/test_6.png", cv2.IMREAD_GRAYSCALE))
     # grey_img = np.array(cv2.imread("data/scanfile/grey-150.png", cv2.IMREAD_GRAYSCALE))
-    grey_img = cv2.resize(grey_img, (0, 0), fx=2, fy=2, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
-    bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
     cv2.imwrite(f"{RESULT_FOLDER}/input.png", grey_img)
+    # grey_img = (255 - np.sqrt((255-grey_img) / 255) * 255).clip(0,255).astype("u1")
+    grey_img = cv2.resize(grey_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
+    bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
+    cv2.imwrite(f"{RESULT_FOLDER}/input(upscaled).png", grey_img)
     cv2.imwrite(f"{RESULT_FOLDER}/binarize.png", 255 - bin_img)
 
     # 提取所有的连通区域
@@ -288,49 +293,63 @@ if __name__ == "__main__":
         place_pattern_on_canvas(symbol.grey_mask, symbol.cx, symbol.cy, cx_should_be, cy_should_be, new_img)
 
     # 保存 SR 结果
-    UPSCALE_GREY_2_BINARY = 2  # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大
     SR_img = (255 - new_img).clip(0, 255)
     cv2.imwrite(f"{RESULT_FOLDER}/SR.png", SR_img)
     cv2.imwrite(f"{RESULT_FOLDER}/SR_binarize.png", cv2.threshold(cv2.resize(SR_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1])
 
     # 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
-    # 构建一个 SVG 画布
-    drawing = svgwrite.Drawing(f"{RESULT_FOLDER}/output.svg", size=(SR_img.shape[1], SR_img.shape[0]))
-    drawing.elements = []   # 清空该 .svg 文件的原有内容
+    drawing = svgwrite.Drawing(f"{RESULT_FOLDER}/output.svg", size=(SR_img.shape[1], SR_img.shape[0]))  # 构建一个 <svg> 画布
+    drawing.elements = []                                                                               # 清空该 .svg 文件的原有内容
     drawing.viewbox(-0.5, -0.5, SR_img.shape[1] + 0.5, SR_img.shape[0] + 0.5)
+    drawing.add(drawing.rect(insert=(0, 0), size=[SR_img.shape[1], SR_img.shape[0]], fill="white"))     # 垫一个矩形作为背景色
 
     # 为每个 Symbol 构建 <path>, 然后注册为 <symbol>
+    USE_POTRACE = True
     debug_no_cmd_symbol_indices = []
-    for sym in symbol_table:
-        # 使用 cv2.findContours() 提取轮廓
-        sym_grey = sym.grey_mask
-        sym_bin = cv2.threshold(cv2.resize(sym_grey, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1]
-        cx, cy = upscaled_coord(sym.cx, 2), upscaled_coord(sym.cy, 2)
-        contours, hierarchy = cv2.findContours(image=sym_bin.astype("u1"), mode=cv2.RETR_CCOMP, # RETR_CCOMP: 提取两层级的轮廓 (0 层级是外轮廓, 1 层级是内轮廓)
-                                               method=cv2.CHAIN_APPROX_TC89_KCOS)               # method 是减少顶点数量选用的算法
-        # 构建绘制指令序列
-        path_cmds: list[str] = []
-        for contour in contours:                        # 比如 `器` 字包含 5 个 contour
-            points = contour.squeeze(1)                 # dim=1 恒为 1, 这是来自 C++ 的兼容性设计
-            points = points / UPSCALE_GREY_2_BINARY     # 由于是在放大的图片上提取的轮廓, 所以需要缩小回来
-            path_cmds.append("M")                       # M x0,y0  L x1,y1  L x2,y2  ...  Z
-            for i, point in enumerate(points):
-                path_cmds.append(f"{point[0]},{point[1]}")
-                if i != len(points) - 1:
-                    path_cmds.append("L")
-            path_cmds.append("Z")
-
-        # 如果有绘制指令, 则构建 <path> 并注册为 <symbol>
-        if path_cmds:
-            # 构建 <path>
-            path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill='black')
-            save_path_to_svg_file(path_elem, [sym.grey_mask.shape[1], sym.grey_mask.shape[0]] , f"{SVG_FOLDER}/symbol_{sym.idx}.svg")
+    for sym in tqdm(symbol_table):
+        sym_grey = sym.grey_mask    # 该符号的灰度图, 其轮廓将基于该图描绘
+        if USE_POTRACE:             # 使用 potrace 提取轮廓
+            # 使用 potrace 提取轮廓, 得到 <g> 的各属性
+            g_elem_info = potrace_utils.mat_to_g_elem(255 - sym_grey)   # potrace 的逻辑是 ｢黑色｣ 为前景, 因此这里需要反色
+            if g_elem_info["d"] == "":
+                debug_no_cmd_symbol_indices.append(sym.idx)
+                continue
+            g_elem = drawing.g(transform=g_elem_info["transform"], fill="#000000",stroke="none")
+            g_elem.add(drawing.path(d=g_elem_info["d"]))
             # 注册 <symbol>
-            symbol_elem = drawing.symbol(id=f"symbol_{sym.idx}")    # 注意这里不加 `#` 前缀!
-            symbol_elem.add(path_elem)
+            symbol_elem = drawing.symbol(id=f"symbol_{sym.idx}")  # 注意这里不加 `#` 前缀!
+            symbol_elem.add(g_elem)
+            # 将 <symbol> 放到 <svg> 上
             drawing.add(symbol_elem)
-        else:
-            debug_no_cmd_symbol_indices.append(sym.idx)
+        else:                       # 使用 cv2.findContours() 提取轮廓
+            sym_bin = cv2.threshold(cv2.resize(sym_grey, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1]
+            cx, cy = upscaled_coord(sym.cx, 2), upscaled_coord(sym.cy, 2)
+            contours, hierarchy = cv2.findContours(image=sym_bin.astype("u1"), mode=cv2.RETR_CCOMP, # RETR_CCOMP: 提取两层级的轮廓 (0 层级是外轮廓, 1 层级是内轮廓)
+                                                   method=cv2.CHAIN_APPROX_TC89_KCOS)               # method 是减少顶点数量选用的算法
+            # 构建绘制指令序列
+            path_cmds: list[str] = []
+            for contour in contours:                        # 比如 `器` 字包含 5 个 contour
+                points = contour.squeeze(1)                 # dim=1 恒为 1, 这是来自 C++ 的兼容性设计
+                points = points / UPSCALE_GREY_2_BINARY     # 由于是在放大的图片上提取的轮廓, 所以需要缩小回来
+                path_cmds.append("M")                       # M x0,y0  L x1,y1  L x2,y2  ...  Z
+                for i, point in enumerate(points):
+                    path_cmds.append(f"{point[0]},{point[1]}")
+                    if i != len(points) - 1:
+                        path_cmds.append("L")
+                path_cmds.append("Z")
+
+            # 如果有绘制指令, 则构建 <path> 并注册为 <symbol>
+            if path_cmds:
+                # 构建 <path>
+                path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill='black')
+                save_path_to_svg_file(path_elem, [sym.grey_mask.shape[1], sym.grey_mask.shape[0]], f"{SVG_FOLDER}/symbol_{sym.idx}.svg")
+                # 注册 <symbol>
+                symbol_elem = drawing.symbol(id=f"symbol_{sym.idx}")    # 注意这里不加 `#` 前缀!
+                symbol_elem.add(path_elem)
+                # 将 <symbol> 放到 <svg> 上
+                drawing.add(symbol_elem)
+            else:
+                debug_no_cmd_symbol_indices.append(sym.idx)
     print(f"Symbol: {debug_no_cmd_symbol_indices} (len={len(debug_no_cmd_symbol_indices)}) 不存在绘制指令!")
 
     # 对于每个 Area, 使用 <use> 引用其对应的 <symbol>
