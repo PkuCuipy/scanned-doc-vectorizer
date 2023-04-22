@@ -56,7 +56,7 @@ class Cluster:
     def __iter__(self):
         return iter(self.areas)
 
-# 计算质心
+# 计算矩阵的质心 (比如 [1 1 1; 1 1 1] 的质心是 [0.5, 1])
 def calc_centroid(mat: np.ndarray) -> np.ndarray:
     cols_sum = np.sum(mat, axis=1)
     rows_sum = np.sum(mat, axis=0)
@@ -66,10 +66,13 @@ def calc_centroid(mat: np.ndarray) -> np.ndarray:
 
 # 亚像素图片移动
 def move_img_subpixel(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
-    assert abs(dx) < 1.0 and abs(dy) < 1.0
+    assert abs(dx) < 1.0 and abs(dy) < 1.0, "仅支持亚像素移动"
     h, w = img.shape
     padded = np.pad(img, 1, mode="edge")
-    x, y = np.meshgrid(np.arange(1, w + 1, dtype="f4") - dx, np.arange(1, h + 1, dtype="f4") - dy)
+    x, y = np.meshgrid(
+        np.arange(1, w + 1, dtype="f4") - dx,   # 0 + 1 和 w + 1 是因为 padding
+        np.arange(1, h + 1, dtype="f4") - dy    # -dx 和 -dy 是因为图片向右移动相当于采样点左移
+    )
     return cv2.remap(padded, x, y, cv2.INTER_LINEAR)
 
 # 一个质点(比如重心)在 upscale 后的新坐标
@@ -93,12 +96,12 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     assert canvas_w >= canvas_w_at_least and canvas_h >= canvas_h_at_least, "提供的画布尺寸太小!"
     # 在超采样前, 先在周围围一圈黑色
     padded_a = np.pad(a.grey_mask, 1, mode='constant', constant_values=(0, 0))
-    upscaled_padded_a = cv2.resize(padded_a, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_LINEAR)   # fixme
-    # 超采样之后的 centroid 坐标
-    upscaled_padded_a_cx = upscaled_coord(a.cx + 1, upscale)  # +1 是因为 padding
+    upscaled_padded_a = cv2.resize(padded_a, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_LINEAR)
+    # 超采样之后的 centroid 坐标  (快速计算, 对 NEAREST, BILINEAR 超采样成立, 对 BICUBIC 不成立)
+    upscaled_padded_a_cx = upscaled_coord(a.cx + 1, upscale)  # +1 计算 padding 导致的第一次重心挪移; upscaled_coord() 计算 scaling 导致的第二次挪移
     upscaled_padded_a_cy = upscaled_coord(a.cy + 1, upscale)
-    # assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(upscaled_padded_a))   # 对 LINEAR 好像也成立的例证. 但对 CUBIC 就不成立了.
-    # 为了将超采样后的 up_a1 和 canvas 的 centroid 对齐, 计算需要移动的量
+    # assert np.allclose([upscaled_padded_a_cx, upscaled_padded_a_cy], calc_centroid(upscaled_padded_a))
+    # 为了将超采样后的 upscaled_padded_a 和 canvas 的 centroid 对齐, 计算需要移动的量
     canvas_cx = center_of_rect(canvas_w)
     canvas_cy = center_of_rect(canvas_h)
     move_x = canvas_cx - upscaled_padded_a_cx
@@ -107,18 +110,17 @@ def move_img_to_target_canvas_with_centroid_aligned_and_up_scaled(a: Area, upsca
     move_x_int, move_x_f32 = float_split(move_x)
     move_y_int, move_y_f32 = float_split(move_y)
     # 初始化 area 的 canvas
-    can = np.zeros((canvas_h, canvas_w), dtype="f4")   # 初始化背景为黑色
+    canvas = np.zeros((canvas_h, canvas_w), dtype="f4")   # 初始化背景为黑色
     # 整数级别的移动
-    can[move_y_int : move_y_int + upscaled_padded_a.shape[0], move_x_int : move_x_int + upscaled_padded_a.shape[1]] = upscaled_padded_a
+    canvas[move_y_int : move_y_int + upscaled_padded_a.shape[0], move_x_int : move_x_int + upscaled_padded_a.shape[1]] = upscaled_padded_a
     # 亚像素级别的移动
-    can = move_img_subpixel(can, move_x_f32, move_y_f32)
-    return can
+    canvas = move_img_subpixel(canvas, move_x_f32, move_y_f32)
+    return canvas
 
 # 在高分辨率下, 将若干个区域的 centroid 对齐
 def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_least_prompt: int = 0, canvas_w_at_least_prompt: int = 0) -> (np.ndarray, float, float):
-    # Note: 目前的实现方式是 先双线性超采样, 然后再移动. 这样涉及两次近似. todo: 可以基于 cv2.remap 实现成仅需一次近似.
     # 以下会自行决定合适的 canvas 尺寸以保证能容纳所有重心对齐的 areas,
-    # 但用户可以通过 canvas_h_at_least_prompt 和 canvas_w_at_least_prompt 来指定最小尺寸. (Debug 用)
+    # 但用户可以通过 canvas_h_at_least_prompt 和 canvas_w_at_least_prompt 来指定最小尺寸.
     assert upscale > 0 and upscale % 1 == 0
     canvas_h = int(max(max(a.cy, a.h - a.cy) for a in areas) + 3) * 2 * upscale     # +3: 留出余量空间
     canvas_w = int(max(max(a.cx, a.w - a.cx) for a in areas) + 3) * 2 * upscale
@@ -197,30 +199,33 @@ if __name__ == "__main__":
     # 设置 plt 窗口大小
     plt.rcParams["figure.figsize"] = (13, 9)
 
-    # 读入图片, 转为灰度图, 然后二值化
-    UPSCALE_GREY_2_BINARY = 2  # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大
-    grey_img = np.array(cv2.imread("data/test_6.png", cv2.IMREAD_GRAYSCALE))
-    # grey_img = np.array(cv2.imread("data/scanfile/grey-150.png", cv2.IMREAD_GRAYSCALE))
+    # 以灰度模式读入图片 (注: 本程序中 img 是白底黑字, mask 是黑底白字)
+    grey_img = np.array(cv2.imread("data/test_17.png", cv2.IMREAD_GRAYSCALE))
     cv2.imwrite(f"{RESULT_FOLDER}/input.png", grey_img)
-    # grey_img = (255 - np.sqrt((255-grey_img) / 255) * 255).clip(0,255).astype("u1")
-    grey_img = cv2.resize(grey_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR) # 在这里放大, 而不是在 align_centroids() 中, 因为这有利于提取区域(?)
-    bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
-    cv2.imwrite(f"{RESULT_FOLDER}/input(upscaled).png", grey_img)
-    cv2.imwrite(f"{RESULT_FOLDER}/binarize.png", 255 - bin_img)
+
+    # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大, 这有利于提取区域(?)
+    UPSCALE_GREY_2_BINARY = 2
+    grey_img = cv2.resize(grey_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR)
+    IMG_H, IMG_W = grey_img.shape
+    bin_threshold, bin_mask = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # bin_mask 前景为白色 (255)
+    cv2.imwrite(f"{RESULT_FOLDER}/input_upscaled.png", grey_img)
+    cv2.imwrite(f"{RESULT_FOLDER}/input_binarized.png", 255 - bin_mask)
 
     # 提取所有的连通区域
-    nr_labels, label_map, label_stats, label_centroids = cv2.connectedComponentsWithStats(bin_img, connectivity=8)    # fixme: 使用 4-连通, 尽可能缩小每个区域, 似乎更适合英文; 8-连通似乎适合中文
+    nr_labels, label_map, label_stats, __label_centroids = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)    # fixme: 使用 4-连通, 尽可能缩小每个区域, 似乎更适合英文; 8-连通似乎适合中文
+    del bin_mask    # bin_mask 仅用于提取连通区域, 后面不应使用
 
     # 保存每个连通区域的信息
     areas = []
     for idx in range(1, nr_labels):     # 0 为背景, 忽略
         x, y, w, h, area = label_stats[idx]
         view = (slice(y, y + h), slice(x, x + w))           # x 向右, y 向下, 因此 y 才是 i, x 才是 j!
-        bin_mask = (label_map[view] == idx)
-        grey_mask = np.where(bin_mask, 255 - grey_img[view], 0)  # 这里假设背景色是 0, 前景是 1~255;  fixme: 被 bin_mask 约束使得遗漏浅色抗锯齿部分
-        centroid = calc_centroid(grey_mask)                      # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
-        mass = np.sum(grey_mask)                                 # 基于灰度图计算, 此前是基于 bin_mask 计算的
-        areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=bin_mask, grey_mask=grey_mask))
+        _bin_mask = (label_map[view] == idx)
+        _grey_mask = np.where(_bin_mask, 255 - grey_img[view], 0)  # 这里假设背景色是 0, 前景是 1~255;  fixme: 被 bin_mask 约束使得遗漏浅色抗锯齿部分
+        centroid = calc_centroid(_grey_mask)                       # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
+        mass = np.sum(_grey_mask)                                  # 基于灰度图计算, 此前是基于 bin_mask 计算的
+        areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=_bin_mask, grey_mask=_grey_mask))
+    del grey_img        # grey_img 后面不应该使用
 
     # 绘制每个连通域
     # plt.imshow(label_map, cmap="jet")   # label_map 作为背景色, 绘制 bbox 于其上
@@ -274,26 +279,26 @@ if __name__ == "__main__":
     for clu in clusters:
         # 根据相似的 Area 制作 Symbol
         new_symbol_idx = len(symbol_table)
-        grey_mask, cx, cy = centroids_aligned_mean(clu.areas, upscale=UPSCALE_AREA_2_SYMBOL)
-        symbol_table.append(Symbol(idx=new_symbol_idx, grey_mask=grey_mask, cx=cx, cy=cy, nr_areas_merged=len(clu.areas), area_ids=[area.idx for area in clu.areas]))
+        _grey_mask, cx, cy = centroids_aligned_mean(clu.areas, upscale=UPSCALE_AREA_2_SYMBOL)
+        symbol_table.append(Symbol(idx=new_symbol_idx, grey_mask=_grey_mask, cx=cx, cy=cy, nr_areas_merged=len(clu.areas), area_ids=[area.idx for area in clu.areas]))
         for area in clu.areas:
             area.symbol_id = new_symbol_idx
 
     # Debug: 输出所有的 symbol
     [cv2.imwrite(f"{SYMBOL_FOLDER}/nr={sym.debug_nr_areas_merged}_areas={sym.debug_area_ids[:3]}_sid={sym.idx}.png", sym.grey_mask) for sym in symbol_table]
 
-    # 构建一个 upscale 的空白图片, 把每个符号都放到这个图片上.
-    new_img = np.zeros(shape=[UPSCALE_AREA_2_SYMBOL * grey_img.shape[0], UPSCALE_AREA_2_SYMBOL * grey_img.shape[1]])
+    # 构建一个 upscale 的空白画布, 把每个符号都放到这个图片上.
+    canvas = np.zeros(shape=[UPSCALE_AREA_2_SYMBOL * IMG_H, UPSCALE_AREA_2_SYMBOL * IMG_W])
     for area in tqdm(areas, desc="将所有的 Symbol 绘制到新的图片上"):
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
         cx_should_be = upscaled_coord(area.cx + area.x, UPSCALE_AREA_2_SYMBOL)
         cy_should_be = upscaled_coord(area.cy + area.y, UPSCALE_AREA_2_SYMBOL)
         # 将 Symbol 绘制在新图片的指定坐标处
-        place_pattern_on_canvas(symbol.grey_mask, symbol.cx, symbol.cy, cx_should_be, cy_should_be, new_img)
+        place_pattern_on_canvas(symbol.grey_mask, symbol.cx, symbol.cy, cx_should_be, cy_should_be, canvas)
 
-    # 保存 SR 结果
-    SR_img = (255 - new_img).clip(0, 255)
+    # 以位图保存 SR 结果
+    SR_img = (255 - canvas).clip(0, 255)
     cv2.imwrite(f"{RESULT_FOLDER}/SR.png", SR_img)
     cv2.imwrite(f"{RESULT_FOLDER}/SR_binarize.png", cv2.threshold(cv2.resize(SR_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1])
 
@@ -303,7 +308,7 @@ if __name__ == "__main__":
     drawing.viewbox(-0.5, -0.5, SR_img.shape[1] + 0.5, SR_img.shape[0] + 0.5)
     drawing.add(drawing.rect(insert=(0, 0), size=[SR_img.shape[1], SR_img.shape[0]], fill="white"))     # 垫一个矩形作为背景色
 
-    # 为每个 Symbol 构建 <path>, 然后注册为 <symbol>
+    # 为每个 Symbol 构建矢量表示, 然后注册为 <symbol>
     USE_POTRACE = True
     debug_no_cmd_symbol_indices = []
     for sym in tqdm(symbol_table):
