@@ -200,14 +200,16 @@ if __name__ == "__main__":
     plt.rcParams["figure.figsize"] = (13, 9)
 
     # 以灰度模式读入图片 (注: 本程序中 img 是白底黑字, mask 是黑底白字)
-    grey_img = np.array(cv2.imread("data/test_17.png", cv2.IMREAD_GRAYSCALE))
+    grey_img = np.array(cv2.imread("data/test_23.png", cv2.IMREAD_GRAYSCALE))
+    # grey_img = np.array(cv2.imread("data/scanfile/text-300.tiff", cv2.IMREAD_GRAYSCALE))
     cv2.imwrite(f"{RESULT_FOLDER}/input.png", grey_img)
 
-    # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大, 这有利于提取区域(?)
-    UPSCALE_GREY_2_BINARY = 2
+    # 考虑到在同分辨率下, 灰度图的边缘更加平滑, 所以在二值化前先对灰度图进行放大, 这有利于提取区域(?) fixme: 对二值图像放大是无意义的, 感觉对有抗锯齿的才有意义?
+    UPSCALE_GREY_2_BINARY = 1
     grey_img = cv2.resize(grey_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR)
     IMG_H, IMG_W = grey_img.shape
-    bin_threshold, bin_mask = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # bin_mask 前景为白色 (255)
+    DARKER_THAN_THAT_BELONGS_TO_MASK = 175
+    bin_threshold, bin_mask = cv2.threshold(grey_img, DARKER_THAN_THAT_BELONGS_TO_MASK, 255, cv2.THRESH_BINARY_INV)   # bin_mask 前景为白色 (255)
     cv2.imwrite(f"{RESULT_FOLDER}/input_upscaled.png", grey_img)
     cv2.imwrite(f"{RESULT_FOLDER}/input_binarized.png", 255 - bin_mask)
 
@@ -222,6 +224,7 @@ if __name__ == "__main__":
         view = (slice(y, y + h), slice(x, x + w))           # x 向右, y 向下, 因此 y 才是 i, x 才是 j!
         _bin_mask = (label_map[view] == idx)
         _grey_mask = np.where(_bin_mask, 255 - grey_img[view], 0)  # 这里假设背景色是 0, 前景是 1~255;  fixme: 被 bin_mask 约束使得遗漏浅色抗锯齿部分
+        # _grey_mask = 255 - grey_img[view]  # 这里假设背景色是 0, 前景是 1~255;  fixme: 根据 bbox 框选, 可能多个 bbox 会重复包含某些像素.
         centroid = calc_centroid(_grey_mask)                       # 基于灰度图计算, 此前是基于 bin_mask 计算的 (label_centroids[idx] - [x, y])
         mass = np.sum(_grey_mask)                                  # 基于灰度图计算, 此前是基于 bin_mask 计算的
         areas.append(Area(idx=idx, x=x, y=y, w=w, h=h, cx=centroid[0], cy=centroid[1], mass=mass, bin_mask=_bin_mask, grey_mask=_grey_mask))
@@ -232,7 +235,7 @@ if __name__ == "__main__":
     for area in tqdm(areas, desc="绘制每个连通域"):
         # plt.gca().add_patch(plt.Rectangle((area.x - 0.5, area.y - 0.5), area.w, area.h, fill=False, edgecolor="r", linewidth=0.5))    # 绘制 bbox
         # plt.gca().add_patch(plt.Circle((area.x + area.cx, area.y + area.cy), radius=0.5, fill=False, edgecolor="g", linewidth=0.5))   # 绘制 centroid
-        cv2.imwrite(f"{AREA_FOLDER}/{area.idx}.png", area.grey_mask)   # 保存图片
+        cv2.imwrite(f"{AREA_FOLDER}/{area.idx}.png", 255 - area.grey_mask)   # 保存图片
     # plt.show()
 
     # 为每个 Area 计算 feature_mat
@@ -289,6 +292,7 @@ if __name__ == "__main__":
 
     # 构建一个 upscale 的空白画布, 把每个符号都放到这个图片上.
     canvas = np.zeros(shape=[UPSCALE_AREA_2_SYMBOL * IMG_H, UPSCALE_AREA_2_SYMBOL * IMG_W])
+    # canvas += (BG_COLOR := 23)
     for area in tqdm(areas, desc="将所有的 Symbol 绘制到新的图片上"):
         symbol = symbol_table[area.symbol_id]
         # 计算原 area 的重心在新图片上的位置
@@ -303,7 +307,7 @@ if __name__ == "__main__":
     cv2.imwrite(f"{RESULT_FOLDER}/SR_binarize.png", cv2.threshold(cv2.resize(SR_img, (0, 0), fx=UPSCALE_GREY_2_BINARY, fy=UPSCALE_GREY_2_BINARY, interpolation=cv2.INTER_LINEAR), 127, 255, cv2.THRESH_BINARY)[1])
 
     # 把每个符号的矢量勾勒出来, 构建一个 svg, 把每个符号放到 svg 上, 导出 svg.
-    drawing = svgwrite.Drawing(f"{RESULT_FOLDER}/output.svg", size=(SR_img.shape[1], SR_img.shape[0]))  # 构建一个 <svg> 画布
+    drawing = svgwrite.Drawing(f"{RESULT_FOLDER}/output.svg", size=("100%", "100%"))  # 构建一个 <svg> 画布
     drawing.elements = []                                                                               # 清空该 .svg 文件的原有内容
     drawing.viewbox(-0.5, -0.5, SR_img.shape[1] + 0.5, SR_img.shape[0] + 0.5)
     drawing.add(drawing.rect(insert=(0, 0), size=[SR_img.shape[1], SR_img.shape[0]], fill="white"))     # 垫一个矩形作为背景色

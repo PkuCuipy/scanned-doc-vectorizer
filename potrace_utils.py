@@ -4,10 +4,8 @@
 import subprocess
 from PIL import Image
 import io
-import numpy as np
 import cv2
 import regex as re
-from tqdm import trange
 
 
 # 传入二维矩阵 (0-255), 调用 potrace 勾勒为 <svg> 后返回 <path> 对应的字符串
