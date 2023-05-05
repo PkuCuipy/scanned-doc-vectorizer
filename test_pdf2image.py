@@ -20,4 +20,7 @@ for i in range(min(doc.page_count, 3)):
     svg = page.get_svg_image(matrix=fitz.Identity)
     print(svg, file=open(f"./result/{i}.svg", "w"))
 
+
+
+
 doc.close()

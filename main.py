@@ -372,5 +372,5 @@ if __name__ == "__main__":
 
     # 保存 SVG
     drawing.save(pretty=True)
-    drawing.saveas(f"./output(open_with_safari).svg", pretty=True)
+
 
