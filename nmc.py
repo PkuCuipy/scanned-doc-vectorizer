@@ -7,7 +7,7 @@ import torch
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+from tqdm import tqdm, trange
 import cv2
 from itertools import product
 import svgwrite
@@ -333,8 +333,9 @@ def block_to_case(block_grid: np.ndarray) -> Case:
 def grid_to_img(grid: np.ndarray, img_h: int, img_w: int) -> Image.Image:
     high_res = ((1 - grid) * 127.5).astype("u1")
     high_res = cv2.resize(high_res, (img_h * 4, img_w * 4), interpolation=cv2.INTER_LINEAR)   # 没必要那么高分辨率, 提高运行效率
-    sigma = (high_res.shape[0] / img_h) * 1.0
-    ker_size = int(sigma * 6) // 2 + 1
+    blur_intensity = 1.5
+    sigma = blur_intensity * (high_res.shape[0] / img_h)
+    ker_size = int(sigma * 6) // 2 * 2 + 1
     blurred = cv2.GaussianBlur(high_res, (ker_size, ker_size), sigma)
     low_res = cv2.resize(blurred, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
     return Image.fromarray(low_res)
@@ -346,22 +347,24 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True
     circles: list[np.ndarray] = []
     for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="case_mat -> svg"):
         c = case_mat[i][j]
-        if c.no == 2: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
-        elif c.no == 3: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
-        elif c.no == 4: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
-        elif c.no == 5: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
-        elif c.no == 6: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
-        elif c.no == 7: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
-        elif c.no == 8: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
-        elif c.no == 9: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
-        elif c.no == 10: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f3 + [i, j]])
-        elif c.no == 11: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f2 + [i, j]])
-        elif c.no == 12: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.extend([c.f2 + [i, j], c.f3 + [i, j]])
-        elif c.no == 13: polylines.append([c.e1 + [i, j], c.f1 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); circles.extend([c.f1 + [i, j], c.f4 + [i, j]])
-        elif c.no == 14: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
-        elif c.no == 15: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
-        elif c.no == 16: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
-        elif c.no == 17: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
+        ij = np.array([i, j])
+        if c.no == 2: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); circles.append(c.f1+ij)
+        elif c.no == 3: polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.append(c.f2+ij)
+        elif c.no == 4: polylines.append([c.e2+ij, c.f3+ij, c.e3+ij]); circles.append(c.f3+ij)
+        elif c.no == 5: polylines.append([c.e3+ij, c.f4+ij, c.e4+ij]); circles.append(c.f4+ij)
+        elif c.no == 6: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); circles.append(c.f1+ij)
+        elif c.no == 7: polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.append(c.f2+ij)
+        elif c.no == 8: polylines.append([c.e2+ij, c.f3+ij, c.e3+ij]); circles.append(c.f3+ij)
+        elif c.no == 9: polylines.append([c.e3+ij, c.f4+ij, c.e4+ij]); circles.append(c.f4+ij)
+        elif c.no == 10: polylines.append([c.e4+ij, c.f4+ij, c.f3+ij, c.e2+ij]); circles.extend([c.f4+ij, c.f3+ij])
+        elif c.no == 11: polylines.append([c.e4+ij, c.f1+ij, c.f2+ij, c.e2+ij]); circles.extend([c.f1+ij, c.f2+ij])
+        elif c.no == 12: polylines.append([c.e1+ij, c.f2+ij, c.f3+ij, c.e3+ij]); circles.extend([c.f2+ij, c.f3+ij])
+        elif c.no == 13: polylines.append([c.e1+ij, c.f1+ij, c.f4+ij, c.e3+ij]); circles.extend([c.f1+ij, c.f4+ij])
+        elif c.no == 14: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); polylines.append([c.e3+ij, c.f3+ij, c.e2+ij]); circles.extend([c.f1+ij, c.f3+ij])
+        elif c.no == 15: polylines.append([c.e4+ij, c.f4+ij, c.e3+ij]); polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.extend([c.f4+ij, c.f2+ij])
+        elif c.no == 16: polylines.append([c.e4+ij, c.f4+ij, c.e3+ij]); polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.extend([c.f4+ij, c.f2+ij])
+        elif c.no == 17: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); polylines.append([c.e3+ij, c.f3+ij, c.e2+ij]); circles.extend([c.f1+ij, c.f3+ij])
+    # 绘制 svg 时要注意将 x, y 坐标反过来以适应 svg 的坐标系
     for polyline in polylines:
         points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
         dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
@@ -417,13 +420,14 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
 if __name__ == "__main__":
 
     # 读入 .svg 文件, 转为 grid
-    nr_blocks_vert = 64
-    nr_blocks_horiz = 64
+    nr_blocks_vert = 100
+    nr_blocks_horiz = 80
     subdiv_per_block = 64
     grid = svg_to_grid("font.svg", nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
     # 随机生成若干个 data pair
     for data_idx in range(10):
+        print(f"\nGenerating data pair {data_idx}...")
 
         # 对 grid 随机偏移, 作为 data augmentation
         dx = np.random.uniform(-1, 1)
