@@ -332,11 +332,11 @@ def block_to_case(block_grid: np.ndarray) -> Case:
 # 传入整个 grid, 返回和 case_mat 同尺寸的光栅化图片. (这里会对高清图片进行模糊等处理后再降采样)
 def grid_to_img(grid: np.ndarray, img_h: int, img_w: int) -> Image.Image:
     high_res = ((1 - grid) * 127.5).astype("u1")
-    high_res = cv2.resize(high_res, (img_h * 4, img_w * 4), interpolation=cv2.INTER_LINEAR)   # 没必要那么高分辨率, 提高运行效率
+    high_res = cv2.resize(high_res, (img_w * 4, img_h * 4), interpolation=cv2.INTER_LINEAR)   # 没必要那么高分辨率, 提高运行效率
     blur_intensity = 1.5
-    sigma = blur_intensity * (high_res.shape[0] / img_h)
-    ker_size = int(sigma * 6) // 2 * 2 + 1
-    blurred = cv2.GaussianBlur(high_res, (ker_size, ker_size), sigma)
+    sigma_x = blur_intensity * (high_res.shape[1] / img_w)
+    ker_size = int(sigma_x * 6) // 2 * 2 + 1
+    blurred = cv2.GaussianBlur(high_res, (ker_size, ker_size), sigma_x)
     low_res = cv2.resize(blurred, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
     return Image.fromarray(low_res)
 
