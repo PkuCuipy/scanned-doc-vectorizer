@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 from tqdm import trange, tqdm
 import cv2
 from itertools import product
-import svgwrite.path
-import svgwrite.shapes
+import svgwrite
+from scipy.signal import convolve2d
 
 N_BLOCKS_MAX = 32                               # 网格边上的 [大方块] 数
 SUBDIV_PER_BLOCK = 32                            # 每个 [大方块] 边的 [小方块] 细分数 (最小为 1 即不细分)
@@ -52,7 +52,7 @@ else:                               # ——
 nr_block_horiz = grid.shape[1] // SUBDIV_PER_BLOCK
 nr_block_vert = grid.shape[0] // SUBDIV_PER_BLOCK
 
-case_mat = np.zeros((nr_block_vert, nr_block_horiz), dtype=np.int32)
+# 根据 [四角正负类型] 初步映射到 Case 编号
 cornerType_2_caseNum = {
     (0, 0, 0, 0): 0,
     (1, 1, 1, 1): 1,
@@ -75,20 +75,14 @@ cornerType_2_caseNum = {
 # 18 Cases of Marching Square
 class Case:
     __slots__ = ("no", "v1", "tu", "e1", "e2", "e3", "e4", "f1", "f2", "f3", "f4")
-    def __init__(self, *, no: int   = -1, v1: bool  = None, tu: bool  = None, e1=None, e2=None, e3=None, e4=None, f1=None, f2=None, f3=None, f4=None):
+    def __init__(self, *, no: int = -1, v1: bool = None, tu: bool = None, e1=None, e2=None, e3=None, e4=None, f1=None, f2=None, f3=None, f4=None):
         self.no, self.v1, self.tu, self.e1, self.e2, self.e3, self.e4, self.f1, self.f2, self.f3, self.f4 = no, v1, tu, e1, e2, e3, e4, f1, f2, f3, f4
     def __repr__(self):
         return f"Case(no={self.no}, v1={self.v1}, tu={self.tu}, \n\t e1={self.e1}, e2={self.e2}, e3={self.e3}, e4={self.e4}, \n\t f1={self.f1}, \n\t f2={self.f2}, \n\t f3={self.f3}, \n\t f4={self.f4})"
     def __float__(self):
         return 0.0
 
-# 注: 相邻的共享节点不重复存储. 代价是最后一行和最后一列被舍弃(?)
-float_part = np.zeros(shape=(nr_block_vert, nr_block_horiz, 10), dtype=np.float32)  # M × N × 10
-float_mask = np.zeros(shape=(nr_block_vert, nr_block_horiz, 10), dtype=bool)        # M × N × 10
-bool_part = np.zeros(shape=(nr_block_vert, nr_block_horiz, 2), dtype=bool)          # M × N × 2
-bool_mask = np.zeros(shape=(nr_block_vert, nr_block_horiz, 2), dtype=bool)          # M × N × 2
-case_mat = np.zeros(shape=(nr_block_vert, nr_block_horiz), dtype=Case)            # M × N
-
+case_mat = np.zeros(shape=(nr_block_vert, nr_block_horiz), dtype=Case)              # M × N
 
 # 计算二维向量的长度的平方. 参数 x 是 (N,2) 的, 返回值是 (N,) 的.
 def length_square(x: torch.Tensor) -> torch.Tensor:
@@ -126,7 +120,7 @@ OPTIMIZER = torch.optim.SGD     # Adam 不知道为啥特别偏爱让点的坐�
 OPTIMIZE_LR = 0.03
 MAX_OPTIMIZE_ITER = 100
 EARLY_BREAK_THRESHOLD = 1e-4
-REGULARIZATION_COEF = 0.05
+REGULARIZATION_COEF = 0.03
 # fixme: 其实觉得这里用梯度下降法可能不是最好的方案, 因为不好控制迭代步数, 收敛偏慢. \
 #        比如一个改进算法的 idea 是: 首先将每个点归入最近的线段,
 #        对于归入线段 A-P 的点, 计算第一奇异向量得到一条直线 l1; 对于归入线段 P-B 的点, 计算第一奇异向量得到另一条直线 l2. \
@@ -178,11 +172,12 @@ def optimized_p1_and_p2(*, A, B, points: np.ndarray) -> tuple[np.ndarray, np.nda
     return p1.detach().clamp(0.001, 0.999).numpy(), p2.detach().clamp(0.001, 0.999).numpy()
 
 # 返回 label_mat 中 label 表征的区域对应的边界点的坐标 ∈ [0,1]×[0,1]
+Laplacian_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]]).astype("f4")
 def edge_points(label_mat: np.ndarray, label: int) -> np.ndarray:
     area = (label_mat == label).astype("u1")
-    edge = cv2.Laplacian(area, -1)  # fixme: 这个不太准
+    edge = convolve2d(area, Laplacian_kernel, boundary="symm", mode="same")
     ijs = np.argwhere(edge)
-    xys = ijs / (label_mat.shape[0] - 1)  # xy ∈ [0,1]×[0,1]  # fixme: 这里也要相应地修改
+    xys = ijs / (label_mat.shape[0] - 1)  # xy ∈ [0,1]×[0,1]
     return xys
 
 
@@ -335,47 +330,56 @@ for i, j in tqdm(product(range(nr_block_vert), range(nr_block_horiz)), total=nr_
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(neg_islands, neg_islands[-1, -1]))
         case_mat[i][j] = Case(no=17, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
 
+# case_mat 导出为 svg
+def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True, draw_grids=True):
+    dwg = svgwrite.Drawing(filename=svg_save_path, size=("100%", "100%"), viewBox=("0 0 %d %d" % (case_mat.shape[1] + 1, case_mat.shape[0] + 1)))
+    polylines: list[list[np.ndarray]] = []
+    circles: list[np.ndarray] = []
+    for i in range(case_mat.shape[0]):
+        for j in range(case_mat.shape[1]):
+            c = case_mat[i][j]
+            if c.no == 2: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
+            elif c.no == 3: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
+            elif c.no == 4: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
+            elif c.no == 5: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
+            elif c.no == 6: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
+            elif c.no == 7: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
+            elif c.no == 8: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
+            elif c.no == 9: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
+            elif c.no == 10: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f3 + [i, j]])
+            elif c.no == 11: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f2 + [i, j]])
+            elif c.no == 12: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.extend([c.f2 + [i, j], c.f3 + [i, j]])
+            elif c.no == 13: polylines.append([c.e1 + [i, j], c.f1 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); circles.extend([c.f1 + [i, j], c.f4 + [i, j]])
+            elif c.no == 14: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
+            elif c.no == 15: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
+            elif c.no == 16: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
+            elif c.no == 17: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
+    for polyline in polylines:
+        points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
+        dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
+    if draw_nodes:
+        for circle in circles:
+            dwg.add(dwg.circle(center=(float(circle[1].round(3)), float(circle[0].round(3))), r="0.05", stroke="red", fill="yellow", stroke_width="0.01"))
+    if draw_grids:
+        for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
+            dwg.add(dwg.rect(insert=(j, i), size=(1, 1), fill="none", stroke="#ddd", stroke_width="0.02"))  # 网格线
+    dwg.save(pretty=True)
 
-# # 可视化每个格子的 case
-# case_num_mat = np.zeros_like(case_mat, dtype=int)
-# for i in range(case_mat.shape[0]):
-#     for j in range(case_mat.shape[1]):
-#         case_num_mat[i][j] = case_mat[i][j].no
-# plt.matshow(case_num_mat, cmap="tab20")
+case_mat_to_svg(case_mat, "./nmc_output.svg")
 
 
-# 导出为 svg
-dwg = svgwrite.Drawing(filename="./nmc_output.svg", size=("100%", "100%"), viewBox=("0 0 %d %d" % (case_mat.shape[1] + 1, case_mat.shape[0] + 1)))
-polylines: list[list[np.ndarray]] = []
-circles: list[np.ndarray] = []
-for i in range(case_mat.shape[0]):
-    for j in range(case_mat.shape[1]):
-        c = case_mat[i][j]
-        if c.no == 2: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
-        elif c.no == 3: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
-        elif c.no == 4: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
-        elif c.no == 5: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
-        elif c.no == 6: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
-        elif c.no == 7: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
-        elif c.no == 8: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
-        elif c.no == 9: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
-        elif c.no == 10: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f3 + [i, j]])
-        elif c.no == 11: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f2 + [i, j]])
-        elif c.no == 12: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.extend([c.f2 + [i, j], c.f3 + [i, j]])
-        elif c.no == 13: polylines.append([c.e1 + [i, j], c.f1 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); circles.extend([c.f1 + [i, j], c.f4 + [i, j]])
-        elif c.no == 14: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
-        elif c.no == 15: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
-        elif c.no == 16: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
-        elif c.no == 17: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
-for polyline in polylines:
-    points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
-    dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
-for circle in circles:
-    dwg.add(dwg.circle(center=(float(circle[1].round(3)), float(circle[0].round(3))), r=0.05, stroke="red", fill="yellow", stroke_width="0.01"))
-for i in range(case_mat.shape[0] + 1):
-    for j in range(case_mat.shape[1] + 1):
-        dwg.add(dwg.rect(insert=(j, i), size=(1, 1), fill="none", stroke="#ddd", stroke_width="0.02"))  # 网格线
-dwg.save(pretty=True)
+# 转为紧凑表示用于 CNN 训练 (注: 相邻的共享节点不重复存储, 最后一行和最后一列直接舍弃)
+float_part = np.zeros(shape=(nr_block_vert, nr_block_horiz, 10), dtype=np.float32)  # M × N × 10
+float_mask = np.zeros(shape=(nr_block_vert, nr_block_horiz, 10), dtype=bool)        # M × N × 10
+bool_part = np.zeros(shape=(nr_block_vert, nr_block_horiz, 2), dtype=bool)          # M × N × 2
+bool_mask = np.zeros(shape=(nr_block_vert, nr_block_horiz, 2), dtype=bool)          # M × N × 2
+
+
+
+
+
+
+
 
 
 
