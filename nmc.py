@@ -7,43 +7,53 @@ import torch
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import trange, tqdm
+from tqdm import tqdm
 import cv2
 from itertools import product
 import svgwrite
 from scipy.signal import convolve2d
 
-
-# 传入一个 .svg 文件, 进行网格密集采样 (注: 我们完全不 care SVG 的矢量表示, 只是因为这玩意可以超高精度采样, 比如如果有 8K 的字符光栅图像, 那理论上也是 ok 的)
-def svg_to_grid(svg_file_path: str, n_blocks_max: int, subdiv_per_block: int) -> tuple[np.ndarray, int, int]:
-    # 参数 n_blocks_max 是网格边上的 [大方块] 数, 而 subdiv_per_block 是每个 [大方块] 边的 [小方块] 细分数 (最小为 1 即不细分)
-    nr_sub_blocks = n_blocks_max * subdiv_per_block     # 计算大网格边上的小方块总数 (注: 边上的格点数还要比这个数再多 1)
+# 传入一个 .svg 文件, 进行网格密集采样  (注: 其实我们完全不 care SVG 的矢量表示, 只是因为这玩意可以超高精度采样, 比如如果有 8K 的字符光栅图像, 那理论上也是 ok 的)
+def svg_to_grid(svg_file_path: str, n_blocks_vert: int, n_blocks_horiz: int, n_subdiv: int) -> np.ndarray:
+    # n_blocks: 网格边上的 [大方块] 数
+    # n_subdiv: 每个 [大方块] 的 [小方块] 细分数 (最小为 1 即不细分)
+    nr_padding_blocks = 1
+    nr_inner_blocks_vert = n_blocks_vert - 2 * nr_padding_blocks
+    nr_inner_blocks_horiz = n_blocks_horiz - 2 * nr_padding_blocks
+    grid_height = n_blocks_vert * n_subdiv + 1
+    grid_width = n_blocks_horiz * n_subdiv + 1
+    inner_grid_height = nr_inner_blocks_vert * n_subdiv + 1
+    inner_grid_width = nr_inner_blocks_horiz * n_subdiv + 1
+    grid: np.ndarray = np.ones([grid_height, grid_width]) * 255.0
+    # 读入 svg
     svg_bytes = open(svg_file_path, "rb").read()
     svg_doc = fitz.Document("svg", svg_bytes)
     page = svg_doc.load_page(0)
-    # 根据 svg 的长宽, 计算一个缩放比例, 使得长边刚好为 nr_sub_blocks
-    width = page.rect.width
-    height = page.rect.height
-    size = max(width, height)
-    scale = nr_sub_blocks / size
+    # 根据 svg 的长宽, 计算一个缩放比例, 使得恰好撑满 inner_box
+    svg_width = page.rect.width
+    svg_height = page.rect.height
+    svg_aspect_ratio = svg_width / svg_height
+    target_aspect_ratio = inner_grid_width / inner_grid_height
+    scale = (inner_grid_height / svg_height) if (svg_aspect_ratio < target_aspect_ratio) else (inner_grid_width / svg_width) # svg 相对瘦高, 则高度是约束; 否则宽度是约束
     # 调用 get_pixmap() 得到的是像素值, 但在 subdiv_per_block 很大的时候, 可以近似为格点值.
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace="gray")
     img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
     mat = np.asarray(img)
-    mat = mat[:nr_sub_blocks + 1, :nr_sub_blocks + 1]   # 防止浮点误差导致多出来一行/列
-    grid = -(mat - 127.5) / 127.5                       # 使得 grid ∈ [-1, 1], 且 [+] 为内部, [-] 为外部
-    # 确保 grid 的尺寸是 N_SUB_DIV 的整倍数 + 1
-    if grid.shape[0] > grid.shape[1]:   # |
-        if (grid.shape[1] - 1) % subdiv_per_block != 0:
-            target_size = ((grid.shape[1] - 1) // subdiv_per_block + 1) * subdiv_per_block + 1
-            grid = np.hstack([grid, -np.ones((grid.shape[0], target_size - grid.shape[1]))])
-    else:                               # ——
-        if (grid.shape[0] - 1) % subdiv_per_block != 0:
-            target_size = ((grid.shape[0] - 1) // subdiv_per_block + 1) * subdiv_per_block + 1
-            grid = np.vstack([grid, -np.ones((target_size - grid.shape[0], grid.shape[1]))])
-    nr_block_horiz = grid.shape[1] // subdiv_per_block  # 网格横边上的 [大方块] 数
-    nr_block_vert = grid.shape[0] // subdiv_per_block   # 网格纵边上的 [大方块] 数
-    return grid, nr_block_horiz, nr_block_vert
+    # 将 mat[][] 放置在 grid[][] 的中心
+    grid_center_horiz = grid_width // 2 + 1
+    grid_center_vert = grid_height // 2 + 1
+    mat_center_horiz = mat.shape[1] // 2 + 1
+    mat_center_vert = mat.shape[0] // 2 + 1
+    bias_horiz = grid_center_horiz - mat_center_horiz   # >= 0
+    bias_vert = grid_center_vert - mat_center_vert      # >= 0
+    grid[bias_vert : bias_vert+mat.shape[0], bias_horiz : bias_horiz+mat.shape[1]] = mat
+    # 使得 grid ∈ [-1, 1], 且 [+] 为内部, [-] 为外部
+    grid = -(grid - 127.5) / 127.5
+    return grid
+
+# 以 block 为单位, 上下左右平移传入的 grid
+def shifted_grid(grid:np.ndarray, shift_x: float, shift_y: float, block_size: int):
+    return np.roll(grid, shift=[int(shift_x * block_size), int(shift_y * block_size)], axis=(0, 1))
 
 # 根据 [四角正负类型] 初步映射到 Case 编号
 cornerType_2_caseNum = {
@@ -211,7 +221,7 @@ def block_to_case(block_grid: np.ndarray) -> Case:
 
     # 计算每个方块的 int(no), bool(v1, tu), float(e1, e4, f1, f2, f3, f4)
     if case_num is None:
-        return Case()
+        return Case(no=-1)
     elif case_num == 0:
         v1 = False
         return Case(no=0, v1=v1)
@@ -319,30 +329,39 @@ def block_to_case(block_grid: np.ndarray) -> Case:
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(neg_islands, neg_islands[-1, -1]))
         return Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
 
+# 传入整个 grid, 返回和 case_mat 同尺寸的光栅化图片. (这里会对高清图片进行模糊等处理后再降采样)
+def grid_to_img(grid: np.ndarray, img_h: int, img_w: int) -> Image.Image:
+    high_res = ((1 - grid) * 127.5).astype("u1")
+    high_res = cv2.resize(high_res, (img_h * 4, img_w * 4), interpolation=cv2.INTER_LINEAR)   # 没必要那么高分辨率, 提高运行效率
+    sigma = (high_res.shape[0] / img_h) * 1.0
+    ker_size = int(sigma * 6) // 2 + 1
+    blurred = cv2.GaussianBlur(high_res, (ker_size, ker_size), sigma)
+    low_res = cv2.resize(blurred, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+    return Image.fromarray(low_res)
+
 # 传入 case_mat, 导出到 .svg 文件
 def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True, draw_grids=True) -> None:
     dwg = svgwrite.Drawing(filename=svg_save_path, size=("100%", "100%"), viewBox=("0 0 %d %d" % (case_mat.shape[1] + 1, case_mat.shape[0] + 1)))
     polylines: list[list[np.ndarray]] = []
     circles: list[np.ndarray] = []
-    for i in range(case_mat.shape[0]):
-        for j in range(case_mat.shape[1]):
-            c = case_mat[i][j]
-            if c.no == 2: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
-            elif c.no == 3: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
-            elif c.no == 4: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
-            elif c.no == 5: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
-            elif c.no == 6: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
-            elif c.no == 7: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
-            elif c.no == 8: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
-            elif c.no == 9: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
-            elif c.no == 10: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f3 + [i, j]])
-            elif c.no == 11: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f2 + [i, j]])
-            elif c.no == 12: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.extend([c.f2 + [i, j], c.f3 + [i, j]])
-            elif c.no == 13: polylines.append([c.e1 + [i, j], c.f1 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); circles.extend([c.f1 + [i, j], c.f4 + [i, j]])
-            elif c.no == 14: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
-            elif c.no == 15: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
-            elif c.no == 16: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
-            elif c.no == 17: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
+    for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="case_mat -> svg"):
+        c = case_mat[i][j]
+        if c.no == 2: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
+        elif c.no == 3: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
+        elif c.no == 4: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
+        elif c.no == 5: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
+        elif c.no == 6: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); circles.append(c.f1 + [i, j])
+        elif c.no == 7: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.append(c.f2 + [i, j])
+        elif c.no == 8: polylines.append([c.e2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.append(c.f3 + [i, j])
+        elif c.no == 9: polylines.append([c.e3 + [i, j], c.f4 + [i, j], c.e4 + [i, j]]); circles.append(c.f4 + [i, j])
+        elif c.no == 10: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f3 + [i, j]])
+        elif c.no == 11: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f2 + [i, j]])
+        elif c.no == 12: polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.f3 + [i, j], c.e3 + [i, j]]); circles.extend([c.f2 + [i, j], c.f3 + [i, j]])
+        elif c.no == 13: polylines.append([c.e1 + [i, j], c.f1 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); circles.extend([c.f1 + [i, j], c.f4 + [i, j]])
+        elif c.no == 14: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
+        elif c.no == 15: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
+        elif c.no == 16: polylines.append([c.e4 + [i, j], c.f4 + [i, j], c.e3 + [i, j]]); polylines.append([c.e1 + [i, j], c.f2 + [i, j], c.e2 + [i, j]]); circles.extend([c.f4 + [i, j], c.f2 + [i, j]])
+        elif c.no == 17: polylines.append([c.e4 + [i, j], c.f1 + [i, j], c.e1 + [i, j]]); polylines.append([c.e3 + [i, j], c.f3 + [i, j], c.e2 + [i, j]]); circles.extend([c.f1 + [i, j], c.f3 + [i, j]])
     for polyline in polylines:
         points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
         dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
@@ -356,12 +375,11 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True
 
 # 传入 case_mat, 返回紧凑表示 (注: 相邻的共享节点不重复存储, 舍弃最后一行和最后一列. 用于 CNN 训练)
 def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    nr_blocks_vert, nr_blocks_horiz = case_mat.shape
-    bool_part = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 2), dtype=bool)    # M × N × 2
-    bool_mask = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 2), dtype=bool)    # M × N × 2
-    float_part = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 10), dtype="f4")  # M × N × 10
-    float_mask = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 10), dtype=bool)  # M × N × 10
-    for i, j in tqdm(product(range(nr_blocks_vert), range(nr_blocks_horiz)), total=nr_blocks_vert*nr_blocks_horiz):
+    bool_part = np.zeros(shape=(*case_mat.shape, 2), dtype=bool)    # M × N × 2
+    bool_mask = np.zeros(shape=(*case_mat.shape, 2), dtype=bool)    # M × N × 2
+    float_part = np.zeros(shape=(*case_mat.shape, 10), dtype="f4")  # M × N × 10
+    float_mask = np.zeros(shape=(*case_mat.shape, 10), dtype=bool)  # M × N × 10
+    for i, j in tqdm(product(range(nr_blocks_vert), range(nr_blocks_horiz)), total=case_mat.size, desc="case_mat -> 4 Tensors"):
         case = case_mat[i][j]
         if case.v1 is not None:
             bool_part[i][j][0] = case.v1
@@ -399,19 +417,33 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
 if __name__ == "__main__":
 
     # 读入 .svg 文件, 转为 grid
-    grid, nr_blocks_horiz, nr_blocks_vert = svg_to_grid("font.svg", (n_blocks_max := 64), (subdiv_per_block := 64))
+    nr_blocks_vert = 64
+    nr_blocks_horiz = 64
+    subdiv_per_block = 64
+    grid = svg_to_grid("font.svg", nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
-    # 为每个 square 计算相应的 case, 以及对应 case 的各种参数
-    case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
-    for i, j in tqdm(product(range(nr_blocks_vert), range(nr_blocks_horiz)), total=nr_blocks_vert * nr_blocks_horiz):
-        block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
-        case_mat[i][j] = block_to_case(block_grid)
+    # 随机生成若干个 data pair
+    for data_idx in range(10):
 
-    # 将 case_mat 存储为 .svg
-    case_mat_to_svg(case_mat, "./nmc_output.svg", draw_nodes=True, draw_grids=True)
+        # 对 grid 随机偏移, 作为 data augmentation
+        dx = np.random.uniform(-1, 1)
+        dy = np.random.uniform(-1, 1)
+        grid = shifted_grid(grid, dx, dy, subdiv_per_block)
 
-    # 将 case_mat 转为四矩阵表示
-    bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
+        # 对每个 block 计算相应的 Case 的各种参数
+        case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
+        for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="grid -> case_mat"):
+            block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
+            case_mat[i][j] = block_to_case(block_grid)
 
+        # 将 case_mat 存储为 .svg
+        case_mat_to_svg(case_mat, f"./result/nmc_output_{data_idx}.svg", draw_nodes=True, draw_grids=True)
 
+        # 将 case_mat 转为四张量表示
+        bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
+        torch.save([bool_part, bool_mask, float_part, float_mask], f"./result/nmc_output_{data_idx}.pt")
+
+        # 将 grid 存储为和 case_mat 同样大小的 .png 光栅图
+        im = grid_to_img(grid, img_h=nr_blocks_vert, img_w=nr_blocks_horiz)
+        im.save(f"./result/nmc_output_{data_idx}.png")
 
