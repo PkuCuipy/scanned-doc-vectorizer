@@ -70,7 +70,7 @@ cornerType_2_caseNum = {
 
 # Marching Square 的 18 种情形
 class Case:
-    __slots__ = ("no", "v1", "tu", "e1", "e2", "e3", "e4", "f1", "f2", "f3", "f4")
+    __slots__ = ("no", "v1", "tu", "e1", "e2", "e3", "e4", "f1", "f2", "f3", "f4")  # tu: 正结点是否构成 tunnel, 仅在 14 15 16 17 时有意义
     def __init__(self, *, no: int = -1, v1: bool = None, tu: bool = None, e1=None, e2=None, e3=None, e4=None, f1=None, f2=None, f3=None, f4=None):
         self.no, self.v1, self.tu, self.e1, self.e2, self.e3, self.e4, self.f1, self.f2, self.f3, self.f4 = no, v1, tu, e1, e2, e3, e4, f1, f2, f3, f4
     def __repr__(self):
@@ -214,7 +214,6 @@ def block_to_case(block_grid: np.ndarray) -> Case:
 
     # 计算每个方块的 int(no), bool(v1, tu), float(e1, e4, f1, f2, f3, f4)
     if case_num is None:
-        print(f"block [{i},{j}] is illegal")
         return Case()
     elif case_num == 0:
         v1 = False
@@ -296,28 +295,32 @@ def block_to_case(block_grid: np.ndarray) -> Case:
         return Case(no=13, v1=v1, e1=e1, e3=e3, f1=f1, f4=f4)
     elif case_num == 14:
         v1 = True
+        tu = False
         e1, e2, e3, e4 = calc_e(1, top_edge), calc_e(2, right_edge), calc_e(3, bottom_edge), calc_e(4, left_edge)
         f1 = optimized_single_p(A=e4, B=e1, points=edge_points(pos_islands, pos_islands[0, 0]))
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(pos_islands, pos_islands[-1, -1]))
-        return Case(no=14, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
+        return Case(no=14, tu=tu, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
     elif case_num == 15:
         v1 = True
+        tu = True
         e1, e2, e3, e4 = calc_e(1, top_edge), calc_e(2, right_edge), calc_e(3, bottom_edge), calc_e(4, left_edge)
         f2 = optimized_single_p(A=e1, B=e2, points=edge_points(neg_islands, neg_islands[0, -1]))
         f4 = optimized_single_p(A=e3, B=e4, points=edge_points(neg_islands, neg_islands[-1, 0]))
-        return Case(no=15, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
+        return Case(no=15, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
     elif case_num == 16:
         v1 = False
+        tu = False
         e1, e2, e3, e4 = calc_e(1, top_edge), calc_e(2, right_edge), calc_e(3, bottom_edge), calc_e(4, left_edge)
         f2 = optimized_single_p(A=e1, B=e2, points=edge_points(pos_islands, pos_islands[0, -1]))
         f4 = optimized_single_p(A=e3, B=e4, points=edge_points(pos_islands, pos_islands[-1, 0]))
-        return Case(no=16, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
+        return Case(no=16, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
     elif case_num == 17:
         v1 = False
+        tu = True
         e1, e2, e3, e4 = calc_e(1, top_edge), calc_e(2, right_edge), calc_e(3, bottom_edge), calc_e(4, left_edge)
         f1 = optimized_single_p(A=e4, B=e1, points=edge_points(neg_islands, neg_islands[0, 0]))
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(neg_islands, neg_islands[-1, -1]))
-        return Case(no=17, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
+        return Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
 
 # 传入 case_mat, 导出到 .svg 文件
 def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True, draw_grids=True) -> None:
@@ -354,23 +357,64 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True
             dwg.add(dwg.rect(insert=(j, i), size=(1, 1), fill="none", stroke="#ddd", stroke_width="0.02"))  # 网格线
     dwg.save(pretty=True)
 
+# 传入 case_mat, 返回紧凑表示 (注: 相邻的共享节点不重复存储, 舍弃最后一行和最后一列. 用于 CNN 训练)
+def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    nr_blocks_vert, nr_blocks_horiz = case_mat.shape
+    bool_part = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 2), dtype=bool)    # M × N × 2
+    bool_mask = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 2), dtype=bool)    # M × N × 2
+    float_part = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 10), dtype="f4")  # M × N × 10
+    float_mask = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz, 10), dtype=bool)  # M × N × 10
+    for i, j in tqdm(product(range(nr_blocks_vert), range(nr_blocks_horiz)), total=nr_blocks_vert*nr_blocks_horiz):
+        case = case_mat[i][j]
+        if case.v1 is not None:
+            bool_part[i][j][0] = case.v1
+            bool_mask[i][j][0] = True
+        if case.tu is not None:
+            bool_part[i][j][1] = case.tu
+            bool_mask[i][j][1] = True
+        if case.e1 is not None:
+            float_part[i][j][0] = case.e1[1]
+            float_mask[i][j][0] = True
+        if case.e4 is not None:
+            float_part[i][j][1] = case.e4[0]
+            float_mask[i][j][1] = True
+        if case.f1 is not None:
+            float_part[i][j][2:4] = case.f1
+            float_mask[i][j][2:4] = True
+        if case.f2 is not None:
+            float_part[i][j][4:6] = case.f2
+            float_mask[i][j][4:6] = True
+        if case.f3 is not None:
+            float_part[i][j][6:8] = case.f3
+            float_mask[i][j][6:8] = True
+        if case.f4 is not None:
+            float_part[i][j][8:10] = case.f4
+            float_mask[i][j][8:10] = True
+    # 维度顺序转换为 Conv2D 的格式, 并转为 torch.Tensor
+    bool_part = torch.tensor(bool_part.transpose((2, 0, 1)), dtype=torch.bool)      # 2 × M × N
+    bool_mask = torch.tensor(bool_mask.transpose((2, 0, 1)), dtype=torch.bool)      # 2 × M × N
+    float_part = torch.tensor(float_part.transpose((2, 0, 1)), dtype=torch.float32) # 10 × M × N
+    float_mask = torch.tensor(float_mask.transpose((2, 0, 1)), dtype=torch.bool)    # 10 × M × N
+    return bool_part, bool_mask, float_part, float_mask
+
+
+
 if __name__ == "__main__":
+
     # 读入 .svg 文件, 转为 grid
     grid, nr_blocks_horiz, nr_blocks_vert = svg_to_grid("font.svg", (n_blocks_max := 64), (subdiv_per_block := 64))
-    # plt.matshow(grid, cmap="bwr")
 
     # 为每个 square 计算相应的 case, 以及对应 case 的各种参数
     case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
     for i, j in tqdm(product(range(nr_blocks_vert), range(nr_blocks_horiz)), total=nr_blocks_vert * nr_blocks_horiz):
-        block_grid = grid[i * subdiv_per_block:(i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
+        block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
         case_mat[i][j] = block_to_case(block_grid)
 
-    # 将 case_mat 转为 svg
+    # 将 case_mat 存储为 .svg
     case_mat_to_svg(case_mat, "./nmc_output.svg", draw_nodes=True, draw_grids=True)
 
-    # 转为紧凑表示用于 CNN 训练 (注: 相邻的共享节点不重复存储, 舍弃最后一行和最后一列)
-    float_part = np.zeros(shape=(nr_blocks_vert - 1, nr_blocks_horiz - 1, 10), dtype=np.float32)  # (M-1) × (N-1) × 10
-    float_mask = np.zeros(shape=(nr_blocks_vert - 1, nr_blocks_horiz - 1, 10), dtype=bool)        # (M-1) × (N-1) × 10
-    bool_part = np.zeros(shape=(nr_blocks_vert - 1, nr_blocks_horiz - 1, 2), dtype=bool)          # (M-1) × (N-1) × 2
-    bool_mask = np.zeros(shape=(nr_blocks_vert - 1, nr_blocks_horiz - 1, 2), dtype=bool)          # (M-1) × (N-1) × 2
+    # 将 case_mat 转为紧凑表示
+    bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
+
+
 
