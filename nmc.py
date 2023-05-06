@@ -13,23 +13,20 @@ from itertools import product
 import svgwrite
 from scipy.signal import convolve2d
 
-# 传入一个 .svg 文件, 进行网格密集采样
+
+# 传入一个 .svg 文件, 进行网格密集采样 (注: 我们完全不 care SVG 的矢量表示, 只是因为这玩意可以超高精度采样, 比如如果有 8K 的字符光栅图像, 那理论上也是 ok 的)
 def svg_to_grid(svg_file_path: str, n_blocks_max: int, subdiv_per_block: int) -> tuple[np.ndarray, int, int]:
     # 参数 n_blocks_max 是网格边上的 [大方块] 数, 而 subdiv_per_block 是每个 [大方块] 边的 [小方块] 细分数 (最小为 1 即不细分)
     nr_sub_blocks = n_blocks_max * subdiv_per_block     # 计算大网格边上的小方块总数 (注: 边上的格点数还要比这个数再多 1)
-    # 读入 svg, 然后转 pdf (否则无法编辑 media_box)
-    svg_doc = fitz.Document(svg_file_path)
-    pdf_bytes = svg_doc.convert_to_pdf()
-    pdf_doc = fitz.Document("pdf", pdf_bytes)
-    page = pdf_doc.load_page(0)
+    svg_bytes = open(svg_file_path, "rb").read()
+    svg_doc = fitz.Document("svg", svg_bytes)
+    page = svg_doc.load_page(0)
     # 根据 svg 的长宽, 计算一个缩放比例, 使得长边刚好为 nr_sub_blocks
     width = page.rect.width
     height = page.rect.height
     size = max(width, height)
     scale = nr_sub_blocks / size
-    # SVG 渲染器得到的是像素值. 为了得到格点值, 将四周扩大 0.5 像素, 这样渲染出的 [像素值] 可以视为原始的 [格点值]
-    correction = 0.5 / scale
-    page.set_mediabox(fitz.Rect(-correction, -correction, width+correction, height+correction))
+    # 调用 get_pixmap() 得到的是像素值, 但在 subdiv_per_block 很大的时候, 可以近似为格点值.
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace="gray")
     img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
     mat = np.asarray(img)
@@ -413,7 +410,7 @@ if __name__ == "__main__":
     # 将 case_mat 存储为 .svg
     case_mat_to_svg(case_mat, "./nmc_output.svg", draw_nodes=True, draw_grids=True)
 
-    # 将 case_mat 转为紧凑表示
+    # 将 case_mat 转为四矩阵表示
     bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
 
 
