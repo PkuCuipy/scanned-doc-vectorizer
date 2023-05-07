@@ -7,7 +7,7 @@ import torch
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm, trange
+from tqdm import tqdm
 import cv2
 from itertools import product
 import svgwrite
@@ -52,7 +52,9 @@ def svg_to_grid(svg_file_path: str, n_blocks_vert: int, n_blocks_horiz: int, n_s
     return grid
 
 # 以 block 为单位, 上下左右平移传入的 grid
-def shifted_grid(grid:np.ndarray, shift_x: float, shift_y: float, block_size: int):
+def random_shifted_grid(grid:np.ndarray, block_size: int, shift_x: float = None, shift_y: float = None):
+    if shift_x is None: shift_x = np.random.uniform(-0.5, 0.5)
+    if shift_y is None: shift_y = np.random.uniform(-0.5, 0.5)
     return np.roll(grid, shift=[int(shift_x * block_size), int(shift_y * block_size)], axis=(0, 1))
 
 # 根据 [四角正负类型] 初步映射到 Case 编号
@@ -196,7 +198,7 @@ def block_to_case(block_grid: np.ndarray) -> Case:
     case_num = cornerType_2_caseNum[corner_type]
 
     # 利用 [连通域] 判别 case 的合法性, 以及区分 14 ↔ 15 和 16 ↔ 17. (注: 只用 pos_island 是不够的, 因为不能排除其内部中空的情形. 比如一个全 1 方阵, 中心有个 0, 这个是非法 case, 但如果只检查 positive 下的连通性, 则会被错误地归为 case 1.)
-    nr_labels_pos, pos_islands = cv2.connectedComponents((positive:=(block_grid > 0).astype("u1")), connectivity=4)  # nr_labels_pos := [正岛屿]个数 + 1(背景)
+    nr_labels_pos, pos_islands = cv2.connectedComponents((positive := (block_grid > 0).astype("u1")), connectivity=4)  # nr_labels_pos := [正岛屿]个数 + 1(背景)
     nr_labels_neg, neg_islands = cv2.connectedComponents(1 - positive, connectivity=4)                          # nr_labels_neg := [负岛屿]个数 + 1(背景)
     nr_pos_islands, nr_neg_islands = nr_labels_pos - 1, nr_labels_neg - 1
     if case_num == 0:
@@ -333,55 +335,67 @@ def block_to_case(block_grid: np.ndarray) -> Case:
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(neg_islands, neg_islands[-1, -1]))
         return Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
 
+# 传入整个 Grid, 返回以 Case 为元素的二维矩阵
+def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int, subdiv_per_block: int) -> np.ndarray:
+    case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
+    for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="grid -> case_mat"):
+        block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
+        case_mat[i][j] = block_to_case(block_grid)
+    return case_mat
+
+
+
 # 传入 [0, 255] 高清图, 返回和 case_mat 同尺寸的, 但加了噪声和模糊的图片.
 def highres_to_lowres_imgs(high_res: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
     # 返回以下 6 类图片各一张:
-    # 0. low
-    # 1. binarized
-    # 2. binarized [then] broken
-    # 3. binarized [then] broken [then] blur
-    # 4. blur
-    # 5. broken [then] blur
 
-    binarize_threshold = np.clip(127 + (np.random.randn() * (30 / 2)), 0, 255)    # 95% 落入 127 ± 30,    i.e. [97, 157]
-    broken_intensity = np.clip(0.05 + (np.random.randn() * (0.05 / 2)), 0, 1)     # 95% 落入 0.05 ± 0.05, i.e. [0, 0.1]
-    blur_intensity = np.clip(1.0 + (np.random.randn() * (0.5 / 2)), 0.1, 2.0)     # 95% 落入 1.0 ± 0.5,   i.e. [0.5, 1.5]
+    binarize_threshold = np.clip(127 + (np.random.randn() * (30 / 2)), 0, 255)    # 95% 落入 127 ± 30. (该阈值越大, 白色越少, 黑色笔画越粗)
+    broken_intensity = np.clip(0.05 + (np.random.randn() * (0.05 / 2)), 0, 1)     # 95% 落入 0.05 ± 0.05. (边界上的点的被破坏的概率)
+    blur_intensity = np.clip(1.0 + (np.random.randn() * (0.5 / 2)), 0.1, 2.0)     # 95% 落入 1.0 ± 0.5.
+    # print(f"binarize_threshold: {binarize_threshold}, broken_intensity: {broken_intensity}, blur_intensity: {blur_intensity}")
 
-    # 0. low
-    low = cv2.resize(high_res, (img_w, img_h), interpolation=cv2.INTER_AREA)
+    # 0. down
+    down = cv2.resize(high_res, (img_w, img_h), interpolation=cv2.INTER_AREA)
 
-    # 1. binarized
-    binarized = ((low > binarize_threshold) * 255).astype("u1")
+    # 1. down [then] downUp
+    down_down = cv2.resize(down, (img_w // 2, img_h // 2), interpolation=cv2.INTER_AREA)
+    down_downUp = cv2.resize(down_down, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
 
-    # 2. binarized + broken
-    EPS = 1e-5
-    edge_mask = (abs(laplacian_edge_detector(binarized)) > EPS)
-    broken_mask = (np.random.rand(*binarized.shape) < broken_intensity)
-    broken_binarized = np.where(edge_mask & broken_mask, 255, binarized)
+    # 2. down [then] downBinUp
+    down_downBin = ((down_down > binarize_threshold) * 255).astype("u1")
+    down_downBinUp = cv2.resize(down_downBin, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
 
-    # 3. binarized + broken + blur
-    blurred_broken_binarized = cv2.GaussianBlur(broken_binarized, (0, 0), sigmaX=blur_intensity)
+    # 3. down [then] binarized
+    down_bin = ((down > binarize_threshold) * 255).astype("u1")
 
-    # 4. blur
+    # 4. down [then] binarized [then] broken
+    edge_mask = (abs(laplacian_edge_detector(down_bin)) > (EPS := 1e-5))
+    broken_mask = (np.random.rand(*down_bin.shape) < broken_intensity)
+    down_bin_broken = np.where(edge_mask & broken_mask, 255, down_bin)
+
+    # 5. down [then] binarized [then] broken [then] blur
+    down_bin_broken_blur = cv2.GaussianBlur(down_bin_broken, (0, 0), sigmaX=blur_intensity)
+
+    # 6. blur [then] down
     sigma = blur_intensity * (high_res.shape[1] / img_w)
-    blurred_highres = cv2.GaussianBlur(high_res, (0, 0), sigma)
-    lowed_blurred = cv2.resize(blurred_highres, (img_w, img_h), interpolation=cv2.INTER_AREA)
+    blur = cv2.GaussianBlur(high_res, (0, 0), sigma)
+    blur_down = cv2.resize(blur, (img_w, img_h), interpolation=cv2.INTER_AREA)
 
-    # 5. broken + blur
+    # 7. broken [then] blur [then] down
     edge_mask = (abs(laplacian_edge_detector(high_res)) > EPS)
     broken_mask = (np.random.rand(*high_res.shape) < (broken_intensity * 2))    # 概率 * 2 是因为 broken 时会有 50% 的概率不变, 比如对原本是 0 的地方 -255, 那最后 clip() 后相当于没变
     broken = (high_res + np.where(edge_mask & broken_mask, np.random.randint(-255, 256, high_res.shape), 0)).clip(0, 255).astype("u1")
-    blurred_broken = cv2.GaussianBlur(broken, (0, 0), sigma * 0.5)    # * 0.5 是一个经验值, 因为如果此时 sigma 太大, 那么刚才加的噪声会被高斯核抹去, 就白加了.
-    lowed_blurred_broken = cv2.resize(blurred_broken, (img_w, img_h), interpolation=cv2.INTER_AREA)
+    broken_blur = cv2.GaussianBlur(broken, (0, 0), sigma * 0.5)    # * 0.5 是一个经验值, 因为如果此时 sigma 太大, 那么刚才加的噪声会被高斯核抹去, 就白加了.
+    broken_blur_down = cv2.resize(broken_blur, (img_w, img_h), interpolation=cv2.INTER_AREA)
 
-    return [low, binarized, broken_binarized, blurred_broken_binarized, lowed_blurred, lowed_blurred_broken]
+    return [down, down_downUp, down_downBinUp, down_bin, down_bin_broken, down_bin_broken_blur, blur_down, broken_blur_down]
 
 # 传入 case_mat, 导出到 .svg 文件
 def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True, draw_grids=True) -> None:
     dwg = svgwrite.Drawing(filename=svg_save_path, size=("100%", "100%"), viewBox=("0 0 %d %d" % (case_mat.shape[1] + 1, case_mat.shape[0] + 1)))
     polylines: list[list[np.ndarray]] = []
     circles: list[np.ndarray] = []
-    for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="case_mat -> svg"):
+    for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
         c = case_mat[i][j]
         ij = np.array([i, j])
         if c.no == 2: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); circles.append(c.f1+ij)
@@ -418,7 +432,7 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     bool_mask = np.zeros(shape=(*case_mat.shape, 2), dtype=bool)    # M × N × 2
     float_part = np.zeros(shape=(*case_mat.shape, 10), dtype="f4")  # M × N × 10
     float_mask = np.zeros(shape=(*case_mat.shape, 10), dtype=bool)  # M × N × 10
-    for i, j in tqdm(product(range(nr_blocks_vert), range(nr_blocks_horiz)), total=case_mat.size, desc="case_mat -> 4 Tensors"):
+    for i, j in product(range(nr_blocks_vert), range(nr_blocks_horiz)):
         case = case_mat[i][j]
         if case.v1 is not None:
             bool_part[i][j][0] = case.v1
@@ -466,48 +480,42 @@ if __name__ == "__main__":
     #                                +--> HighResImg[aug1] --[aug2]--> LowResImg[aug1 * aug2]
     #
     # 其中: [aug1] 为对 grid 的随机偏移, [aug2] 为对高清图的随机模糊、随机噪声 etc.
+
     nr_grids_per_svg = 10   # 每个 svg 文件生成的 grid 数量 (aug1: grid 的随机偏移)
     nr_imgs_per_grid = 10   # 每个 grid 生成的图片数量 (aug2: 不同的模糊核, 噪音 etc.)
 
     # 读入 .svg 文件, 转为 grid
     svg_idx = 0
-    svg_filename = "font.svg"
+    svg_filename = "./data/font.svg"
     nr_blocks_vert = 100
     nr_blocks_horiz = 80
     subdiv_per_block = 64
-    print(f"svg_idx = {svg_idx}")
     grid = svg_to_grid(svg_filename, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
     # 随机生成若干个 data pair
     for grid_idx in range(nr_grids_per_svg):
-        print(f"  grid_idx = {grid_idx}")
+        print(f"svg({svg_idx}).grid({grid_idx}):")
 
         # 对 grid 随机偏移, 作为 grid 的数据扩充
-        dx = np.random.uniform(-1, 1)
-        dy = np.random.uniform(-1, 1)
-        grid = shifted_grid(grid, dx, dy, subdiv_per_block)
+        grid = random_shifted_grid(grid, subdiv_per_block)
 
         # 对每个 block 计算相应的 Case 的各种参数
-        case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
-        for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="grid -> case_mat"):
-            block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
-            case_mat[i][j] = block_to_case(block_grid)
+        case_mat = grid_to_case_mat(grid, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
-        # (Debug) 将 case_mat 存储为 .svg
-        if save_to_svg := True:
-            case_mat_to_svg(case_mat, f"./result/svg({svg_idx}).grid({grid_idx}).svg", draw_nodes=True, draw_grids=True)
+        # 将 case_mat 存储为 .svg
+        case_mat_to_svg(case_mat, f"./result/svg({svg_idx}).grid({grid_idx}).svg", draw_nodes=True, draw_grids=True)
 
         # 将 case_mat 转为四张量表示
         bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
         torch.save([bool_part, bool_mask, float_part, float_mask], f"./result/svg({svg_idx}).grid({grid_idx}).pt")
 
-        # 将 grid 存储为和 case_mat 同样大小的 .png 光栅图
-        grid_img = ((1 - grid) * 127.5).astype("u1")     # ∈ [0, 255]
-        high_res = cv2.resize(grid_img, (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)  # 没必要那么高分辨率, 提高运行效率
+        # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
+        high_res = cv2.resize(((1 - grid) * 127.5).astype("u1"), (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)
+
+        # 生成和 case_mat 同样大小的 PNG 光栅图, 并随机加入噪声、模糊等作为 data augmentation
         for img_idx in range(nr_imgs_per_grid):
-            print(f"    img_idx = {img_idx}")
-            low_res_imgs = highres_to_lowres_imgs(high_res, img_h=nr_blocks_vert, img_w=nr_blocks_horiz)     # fixme: 尚未实现随机性
-            for type, low_res in enumerate(low_res_imgs):
-                im = Image.fromarray(low_res)
-                im.save(f"./result/svg({svg_idx}).grid({grid_idx}).img({img_idx}).type({type}).png")
+            low_res_imgs = highres_to_lowres_imgs(high_res, img_h=nr_blocks_vert, img_w=nr_blocks_horiz)
+            for typ, img in enumerate(low_res_imgs):
+                im = Image.fromarray(img)
+                im.save(f"./result/svg({svg_idx}).grid({grid_idx}).img({img_idx}).type({typ}).png")
 
