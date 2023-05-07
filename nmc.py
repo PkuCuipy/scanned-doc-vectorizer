@@ -329,16 +329,15 @@ def block_to_case(block_grid: np.ndarray) -> Case:
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(neg_islands, neg_islands[-1, -1]))
         return Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
 
-# 传入整个 grid, 返回和 case_mat 同尺寸的光栅化图片. (这里会对高清图片进行模糊等处理后再降采样)
-def grid_to_img(grid: np.ndarray, img_h: int, img_w: int) -> Image.Image:
-    high_res = ((1 - grid) * 127.5).astype("u1")
-    high_res = cv2.resize(high_res, (img_w * 4, img_h * 4), interpolation=cv2.INTER_LINEAR)   # 没必要那么高分辨率, 提高运行效率
+# 传入 [0, 255] 高清图, 返回和 case_mat 同尺寸的, 但加了噪声和模糊的图片.
+def highres_to_lowres(high_res: np.ndarray, img_h: int, img_w: int) -> np.ndarray:
+    assert high_res.dtype == np.uint8, "请传入 [0, 255] uint8 图片"
     blur_intensity = 1.5
     sigma_x = blur_intensity * (high_res.shape[1] / img_w)
     ker_size = int(sigma_x * 6) // 2 * 2 + 1
     blurred = cv2.GaussianBlur(high_res, (ker_size, ker_size), sigma_x)
     low_res = cv2.resize(blurred, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
-    return Image.fromarray(low_res)
+    return low_res
 
 # 传入 case_mat, 导出到 .svg 文件
 def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True, draw_grids=True) -> None:
@@ -418,18 +417,35 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
 
 
 if __name__ == "__main__":
+    #
+    # 如果不考虑数据扩充, 数据流为:
+    #     SVG --> Grid --> CaseMat --> CompactTensor
+    #              |
+    #              +----> HighResImg --> LowResImg
+    #
+    # 如果考虑数据扩充, 数据流为:
+    #     SVG --> Grid --[aug1]--> Grid[aug1] ---> CaseMat[aug1] ---> CompactTensor[aug1]
+    #                                |
+    #                                +--> HighResImg[aug1] --[aug2]--> LowResImg[aug1 * aug2]
+    #
+    # 其中: [aug1] 为对 grid 的随机偏移, [aug2] 为对高清图的随机模糊、随机噪声 etc.
+    nr_grids_per_svg = 10   # 每个 svg 文件生成的 grid 数量 (aug1: grid 的随机偏移)
+    nr_imgs_per_grid = 10   # 每个 grid 生成的图片数量 (aug2: 不同的模糊核, 噪音 etc.)
 
     # 读入 .svg 文件, 转为 grid
+    svg_idx = 0
+    svg_filename = "font.svg"
     nr_blocks_vert = 100
     nr_blocks_horiz = 80
     subdiv_per_block = 64
-    grid = svg_to_grid("font.svg", nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
+    grid = svg_to_grid(svg_filename, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
+    print(f"svg_idx = {svg_idx}")
 
     # 随机生成若干个 data pair
-    for data_idx in range(10):
-        print(f"\nGenerating data pair {data_idx}...")
+    for grid_idx in range(nr_grids_per_svg):
+        print(f"  grid_idx = {grid_idx}")
 
-        # 对 grid 随机偏移, 作为 data augmentation
+        # 对 grid 随机偏移, 作为 grid 的数据扩充
         dx = np.random.uniform(-1, 1)
         dy = np.random.uniform(-1, 1)
         grid = shifted_grid(grid, dx, dy, subdiv_per_block)
@@ -440,14 +456,20 @@ if __name__ == "__main__":
             block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
             case_mat[i][j] = block_to_case(block_grid)
 
-        # 将 case_mat 存储为 .svg
-        case_mat_to_svg(case_mat, f"./result/nmc_output_{data_idx}.svg", draw_nodes=True, draw_grids=True)
+        # (Debug) 将 case_mat 存储为 .svg
+        if save_to_svg := True:
+            case_mat_to_svg(case_mat, f"./result/svg_{svg_idx}__grid_{grid_idx}.svg", draw_nodes=True, draw_grids=True)
 
         # 将 case_mat 转为四张量表示
         bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
-        torch.save([bool_part, bool_mask, float_part, float_mask], f"./result/nmc_output_{data_idx}.pt")
+        torch.save([bool_part, bool_mask, float_part, float_mask], f"./result/svg_{svg_idx}__grid_{grid_idx}.pt")
 
         # 将 grid 存储为和 case_mat 同样大小的 .png 光栅图
-        im = grid_to_img(grid, img_h=nr_blocks_vert, img_w=nr_blocks_horiz)
-        im.save(f"./result/nmc_output_{data_idx}.png")
+        grid_img = ((1 - grid) * 127.5).astype("u1")
+        high_res = cv2.resize(grid_img, (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)  # 没必要那么高分辨率, 提高运行效率
+        for img_idx in range(nr_imgs_per_grid):
+            print(f"    img_idx = {img_idx}")
+            low_res = highres_to_lowres(high_res, img_h=nr_blocks_vert, img_w=nr_blocks_horiz)     # fixme: 尚未实现随机性
+            im = Image.fromarray(low_res)
+            im.save(f"./result/svg_{svg_idx}__grid_{grid_idx}__img_{img_idx}.png")
 
