@@ -1,6 +1,4 @@
 # 2023-05-03
-# 传入一个 SVG, 尺寸向上取整为 M × N,
-# 那么就对应于 M × N 个小方块, 每个小方块里对应一些边.
 
 import fitz
 import torch
@@ -543,7 +541,7 @@ if __name__ == "__main__":
     nr_imgs_per_grid = 10   # 每个 grid 生成的图片数量 (aug2: 不同的模糊核, 噪音 etc.)
 
     svg_idx = 0
-    svg_filename = "./data/font.svg"
+    svg_filename = "../data/font.svg"
     nr_blocks_vert = 100
     nr_blocks_horiz = 80
     subdiv_per_block = 64
