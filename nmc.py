@@ -27,8 +27,14 @@ def svg_to_grid(svg_file_path: str, n_blocks_vert: int, n_blocks_horiz: int, n_s
     grid: np.ndarray = np.ones([grid_height, grid_width]) * 255.0
     # 读入 svg
     svg_bytes = open(svg_file_path, "rb").read()
-    svg_doc = fitz.Document("svg", svg_bytes)
-    page = svg_doc.load_page(0)
+    doc = fitz.Document("svg", svg_bytes)
+    if (zoom := 1.0) != 1.0:                    # 中心缩放, 比如 zoom = 1.5 可以解决原 svg 的 padding 太大的问题
+        pdf_bytes = doc.convert_to_pdf()        # svg 在 fitz 下不支持 set_mediabox(), 要先转为 pdf
+        doc = fitz.Document("pdf", pdf_bytes)
+        page = doc.load_page(0)
+        cx, cy = page.rect.width / 2, page.rect.height / 2
+        page.set_mediabox(fitz.Rect(cx * (1 - 1 / zoom), cy * (1 - 1 / zoom), cx * (1 + 1 / zoom), cy * (1 + 1 / zoom)))
+    page = doc.load_page(0)
     # 根据 svg 的长宽, 计算一个缩放比例, 使得恰好撑满 inner_box
     svg_width = page.rect.width
     svg_height = page.rect.height
@@ -39,7 +45,7 @@ def svg_to_grid(svg_file_path: str, n_blocks_vert: int, n_blocks_horiz: int, n_s
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace="gray")
     img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
     mat = np.asarray(img)
-    # 将 mat[][] 放置在 grid[][] 的中心
+    # 将 mat[, ] 放置在 grid[, ] 的中心
     grid_center_horiz = grid_width // 2 + 1
     grid_center_vert = grid_height // 2 + 1
     mat_center_horiz = mat.shape[1] // 2 + 1
@@ -73,6 +79,10 @@ cornerType_2_caseNum = {
     (0, 0, 1, 1): 11,
     (1, 0, 0, 1): 12,
     (0, 1, 1, 0): 13,
+    (1, 0, 1, 0, False): 14,
+    (1, 0, 1, 0, True): 15,
+    (0, 1, 0, 1, False): 16,
+    (0, 1, 0, 1, True): 17,
     (1, 0, 1, 0): 1415,
     (0, 1, 0, 1): 1617,
 }
@@ -340,10 +350,8 @@ def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int
     case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
     for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="grid -> case_mat"):
         block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
-        case_mat[i][j] = block_to_case(block_grid)
+        case_mat[i, j] = block_to_case(block_grid)
     return case_mat
-
-
 
 # 传入 [0, 255] 高清图, 返回和 case_mat 同尺寸的, 但加了噪声和模糊的图片.
 def highres_to_lowres_imgs(high_res: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
@@ -396,9 +404,12 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str, *, draw_nodes=True
     polylines: list[list[np.ndarray]] = []
     circles: list[np.ndarray] = []
     for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
-        c = case_mat[i][j]
+        c = case_mat[i, j]
         ij = np.array([i, j])
-        if c.no == 2: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); circles.append(c.f1+ij)
+        if c.no == -1: continue
+        elif c.no == 0: continue
+        elif c.no == 1: continue
+        elif c.no == 2: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); circles.append(c.f1+ij)
         elif c.no == 3: polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.append(c.f2+ij)
         elif c.no == 4: polylines.append([c.e2+ij, c.f3+ij, c.e3+ij]); circles.append(c.f3+ij)
         elif c.no == 5: polylines.append([c.e3+ij, c.f4+ij, c.e4+ij]); circles.append(c.f4+ij)
@@ -433,31 +444,31 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     float_part = np.zeros(shape=(*case_mat.shape, 10), dtype="f4")  # M × N × 10
     float_mask = np.zeros(shape=(*case_mat.shape, 10), dtype=bool)  # M × N × 10
     for i, j in product(range(nr_blocks_vert), range(nr_blocks_horiz)):
-        case = case_mat[i][j]
+        case = case_mat[i, j]
         if case.v1 is not None:
-            bool_part[i][j][0] = case.v1
-            bool_mask[i][j][0] = True
+            bool_part[i, j, 0] = case.v1
+            bool_mask[i, j, 0] = True
         if case.tu is not None:
-            bool_part[i][j][1] = case.tu
-            bool_mask[i][j][1] = True
+            bool_part[i, j, 1] = case.tu
+            bool_mask[i, j, 1] = True
         if case.e1 is not None:
-            float_part[i][j][0] = case.e1[1]
-            float_mask[i][j][0] = True
+            float_part[i, j, 0] = case.e1[1]
+            float_mask[i, j, 0] = True
         if case.e4 is not None:
-            float_part[i][j][1] = case.e4[0]
-            float_mask[i][j][1] = True
+            float_part[i, j, 1] = case.e4[0]
+            float_mask[i, j, 1] = True
         if case.f1 is not None:
-            float_part[i][j][2:4] = case.f1
-            float_mask[i][j][2:4] = True
+            float_part[i, j, 2:4] = case.f1
+            float_mask[i, j, 2:4] = True
         if case.f2 is not None:
-            float_part[i][j][4:6] = case.f2
-            float_mask[i][j][4:6] = True
+            float_part[i, j, 4:6] = case.f2
+            float_mask[i, j, 4:6] = True
         if case.f3 is not None:
-            float_part[i][j][6:8] = case.f3
-            float_mask[i][j][6:8] = True
+            float_part[i, j, 6:8] = case.f3
+            float_mask[i, j, 6:8] = True
         if case.f4 is not None:
-            float_part[i][j][8:10] = case.f4
-            float_mask[i][j][8:10] = True
+            float_part[i, j, 8:10] = case.f4
+            float_mask[i, j, 8:10] = True
     # 维度顺序转换为 Conv2D 的格式, 并转为 torch.Tensor
     bool_part = torch.tensor(bool_part.transpose((2, 0, 1)), dtype=torch.bool)      # 2 × M × N
     bool_mask = torch.tensor(bool_mask.transpose((2, 0, 1)), dtype=torch.bool)      # 2 × M × N
@@ -465,7 +476,54 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     float_mask = torch.tensor(float_mask.transpose((2, 0, 1)), dtype=torch.bool)    # 10 × M × N
     return bool_part, bool_mask, float_part, float_mask
 
+# 检查传入的参数是否 [全都不是 None]
+def all_is_not_None(*args) -> bool:
+    return all([x is not None for x in args])
 
+# 传入紧凑表示, 返回 case_mat (少一行, 少一列, 填补为 Case=-1)
+def recover_case_mat_from_compact(bool_part: torch.Tensor, bool_mask: torch.Tensor, float_part: torch.Tensor, float_mask: torch.Tensor) -> np.ndarray:
+    nr_blocks_vert = bool_part.shape[1]
+    nr_blocks_horiz = bool_part.shape[2]
+    case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
+    case_mat[:, -1] = Case(no=-1)
+    case_mat[-1, :] = Case(no=-1)
+    for i, j in product(range(nr_blocks_vert - 1), range(nr_blocks_horiz - 1)):
+        # 尽力获取每个信息 (注: None 可能源自 [自己/右/下/右下] 有 invalid 的, 也可能本来就是 None)
+        v1 = bool(bool_part[0, i, j]) if bool_mask[0, i, j] else None
+        v2 = bool(bool_part[0, i, j+1]) if bool_mask[0, i, j+1] else None
+        v3 = bool(bool_part[0, i+1, j+1]) if bool_mask[0, i+1, j+1] else None
+        v4 = bool(bool_part[0, i+1, j]) if bool_mask[0, i+1, j] else None
+        tu = bool(bool_part[1, i, j]) if bool_mask[1, i, j] else None
+        e1 = (0, float_part[0, i, j]) if float_mask[0, i, j] else None
+        e2 = (float_part[1, i, j+1], 1) if float_mask[1, i, j+1] else None
+        e3 = (1, float_part[0, i+1, j]) if float_mask[0, i+1, j] else None
+        e4 = (float_part[1, i, j], 0) if float_mask[1, i, j] else None
+        f1 = float_part[2:4, i, j].numpy() if float_mask[2, i, j] else None
+        f2 = float_part[4:6, i, j].numpy() if float_mask[4, i, j] else None
+        f3 = float_part[6:8, i, j].numpy() if float_mask[6, i, j] else None
+        f4 = float_part[8:10, i, j].numpy() if float_mask[8, i, j] else None
+        no = cornerType_2_caseNum.get((v1, v2, v3, v4) if tu is None else (v1, v2, v3, v4, tu), None)
+        if no is None: case_mat[i, j] = Case(no=-1)
+        elif no == 0 and all_is_not_None(v1): case_mat[i, j] = Case(no=0, v1=v1)
+        elif no == 1 and all_is_not_None(v1): case_mat[i, j] = Case(no=1, v1=v1)
+        elif no == 2 and all_is_not_None(v1, e4, e1, f1): case_mat[i, j] = Case(no=2, v1=v1, e4=e4, e1=e1, f1=f1)
+        elif no == 3 and all_is_not_None(v1, e1, e2, f2): case_mat[i, j] = Case(no=3, v1=v1, e1=e1, e2=e2, f2=f2)
+        elif no == 4 and all_is_not_None(v1, e2, e3, f3): case_mat[i, j] = Case(no=4, v1=v1, e2=e2, e3=e3, f3=f3)
+        elif no == 5 and all_is_not_None(v1, e3, e4, f4): case_mat[i, j] = Case(no=5, v1=v1, e3=e3, e4=e4, f4=f4)
+        elif no == 6 and all_is_not_None(v1, e4, e1, f1): case_mat[i, j] = Case(no=6, v1=v1, e4=e4, e1=e1, f1=f1)
+        elif no == 7 and all_is_not_None(v1, e1, e2, f2): case_mat[i, j] = Case(no=7, v1=v1, e1=e1, e2=e2, f2=f2)
+        elif no == 8 and all_is_not_None(v1, e2, e3, f3): case_mat[i, j] = Case(no=8, v1=v1, e2=e2, e3=e3, f3=f3)
+        elif no == 9 and all_is_not_None(v1, e3, e4, f4): case_mat[i, j] = Case(no=9, v1=v1, e3=e3, e4=e4, f4=f4)
+        elif no == 10 and all_is_not_None(v1, e4, e2, f4, f3): case_mat[i, j] = Case(no=10, v1=v1, e4=e4, e2=e2, f4=f4, f3=f3)
+        elif no == 11 and all_is_not_None(v1, e4, e2, f1, f2): case_mat[i, j] = Case(no=11, v1=v1, e4=e4, e2=e2, f1=f1, f2=f2)
+        elif no == 12 and all_is_not_None(v1, e1, e3, f2, f3): case_mat[i, j] = Case(no=12, v1=v1, e1=e1, e3=e3, f2=f2, f3=f3)
+        elif no == 13 and all_is_not_None(v1, e1, e3, f1, f4): case_mat[i, j] = Case(no=13, v1=v1, e1=e1, e3=e3, f1=f1, f4=f4)
+        elif no == 14 and all_is_not_None(v1, e1, e2, e3, e4, f1, f3): case_mat[i, j] = Case(no=14, tu=tu, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
+        elif no == 15 and all_is_not_None(v1, e1, e2, e3, e4, f2, f4): case_mat[i, j] = Case(no=15, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
+        elif no == 16 and all_is_not_None(v1, e1, e2, e3, e4, f2, f4): case_mat[i, j] = Case(no=16, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
+        elif no == 17 and all_is_not_None(v1, e1, e2, e3, e4, f1, f3): case_mat[i, j] = Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
+        else: case_mat[i, j] = Case(no=-1)
+    return case_mat
 
 if __name__ == "__main__":
     #
@@ -484,12 +542,13 @@ if __name__ == "__main__":
     nr_grids_per_svg = 10   # 每个 svg 文件生成的 grid 数量 (aug1: grid 的随机偏移)
     nr_imgs_per_grid = 10   # 每个 grid 生成的图片数量 (aug2: 不同的模糊核, 噪音 etc.)
 
-    # 读入 .svg 文件, 转为 grid
     svg_idx = 0
     svg_filename = "./data/font.svg"
     nr_blocks_vert = 100
     nr_blocks_horiz = 80
     subdiv_per_block = 64
+
+    # 读入 .svg 文件, 转为 grid
     grid = svg_to_grid(svg_filename, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
     # 随机生成若干个 data pair
@@ -508,6 +567,10 @@ if __name__ == "__main__":
         # 将 case_mat 转为四张量表示
         bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
         torch.save([bool_part, bool_mask, float_part, float_mask], f"./result/svg({svg_idx}).grid({grid_idx}).pt")
+
+        # 将四张量表示转回 case_mat, 用于验证正确性
+        case_mat_recovered = recover_case_mat_from_compact(bool_part, bool_mask, float_part, float_mask)
+        case_mat_to_svg(case_mat_recovered, f"./result/svg({svg_idx}).grid({grid_idx}).verify.svg", draw_nodes=True, draw_grids=True)
 
         # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
         high_res = cv2.resize(((1 - grid) * 127.5).astype("u1"), (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)
