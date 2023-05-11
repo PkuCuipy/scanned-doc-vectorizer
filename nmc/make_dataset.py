@@ -13,6 +13,8 @@ import svgwrite
 from scipy.signal import convolve2d
 from pathlib import Path
 import random
+import multiprocessing
+import functools
 
 # 传入一个 .svg 文件, 进行网格密集采样  (注: 其实我们完全不 care SVG 的矢量表示, 只是因为这玩意可以超高精度采样, 比如如果有 8K 的字符光栅图像, 那理论上也是 ok 的)
 def svg_to_grid(svg_file_path: str | Path, n_blocks_vert: int, n_blocks_horiz: int, n_subdiv: int) -> np.ndarray:
@@ -60,6 +62,7 @@ def svg_to_grid(svg_file_path: str | Path, n_blocks_vert: int, n_blocks_horiz: i
 
 # 以 block 为单位, 上下左右平移传入的 grid
 def random_shifted_grid(grid:np.ndarray, block_size: int, shift_x: float = None, shift_y: float = None):
+    # 移动最多 0.5 个 block 即可, 因为 CNN 有平移不变性
     if shift_x is None: shift_x = np.random.uniform(-0.5, 0.5)
     if shift_y is None: shift_y = np.random.uniform(-0.5, 0.5)
     return np.roll(grid, shift=[int(shift_x * block_size), int(shift_y * block_size)], axis=(0, 1))
@@ -460,7 +463,7 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     float_part = np.zeros(shape=(*case_mat.shape, 10), dtype="f4")  # M × N × 10
     float_part += [0.5,0.5, 0.3,0.3, 0.3,0.7, 0.7,0.7, 0.7,0.3]     # 默认初始值
     float_mask = np.zeros(shape=(*case_mat.shape, 10), dtype=bool)  # M × N × 10
-    for i, j in product(range(nr_blocks_vert), range(nr_blocks_horiz)):
+    for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
         case = case_mat[i, j]
         if case.v1 is not None:
             bool_part[i, j, 0] = case.v1
@@ -492,7 +495,6 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     float_part = torch.tensor(float_part.transpose((2, 0, 1)), dtype=torch.float32) # 10 × M × N
     float_mask = torch.tensor(float_mask.transpose((2, 0, 1)), dtype=torch.bool)    # 10 × M × N
     return bool_part, bool_mask, float_part, float_mask
-
 
 # 传入紧凑表示, 返回 case_mat (少一行, 少一列, 填补为 Case=-1)
 def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Tensor) -> np.ndarray:
@@ -542,64 +544,87 @@ def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Ten
         else: case_mat[i, j] = Case(no=-1)
     return case_mat
 
+# 将一个 svg 文件转为若干个 lowRes 图片 + 相应的 Tensor GT, 输出到指定文件夹
+def svg_to_dataset(data_idx: int,
+                   svg_filename: Path,
+                   output_folder: Path,
+                   nr_lrImgs_per_svg: int,
+                   nr_blocks_vert: int,
+                   nr_blocks_horiz: int,
+                   subdiv_per_block: int
+                   ):
+
+    print(f"正在处理 {data_idx} ({svg_filename.name}) ...")
+
+    # 读入 .svg 文件, 转为 grid
+    grid = svg_to_grid(svg_filename, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
+
+    # 对 grid 随机偏移, 作为 grid 的数据扩充
+    grid = random_shifted_grid(grid, subdiv_per_block)
+
+    # 计算 case_mat
+    case_mat = grid_to_case_mat(grid, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
+
+    # 将 case_mat 存储为 .svg
+    if visualize_case_mat := True:
+        # 注: 此时 case_mat 中无法被确定的会被标记为 no=-1,
+        # 但一会转成 Tensor 之后就丢失了这一层意味,
+        # 于是从 Tensor 恢复出的 case_mat 就不再包含 no=-1 的情形.
+        case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_nodes=True, draw_grids=True)
+
+    # 将 case_mat 转为四张量表示
+    bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
+    torch.save([bool_part, bool_mask, float_part, float_mask], output_folder / f"Y_{data_idx}.pt")
+
+    # 将四张量表示转回 case_mat, 用于验证正确性
+    if verify := True:
+        # 将 Tensor 转为 case_mat, 然后输出 .svg
+        case_mat_recovered = recover_case_mat_from_compact(bool_part, float_part)
+        case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_nodes=True, draw_grids=True)
+        # 将 Tensor 随机扰动一下, 然后再转为 case_mat, 最后输出 .svg
+        random_flip_mask = torch.rand(size=bool_mask.shape) < 0.05
+        random_disturb = torch.rand(size=float_part.shape) * 0.05
+        new_bool_part = bool_part ^ random_flip_mask
+        new_float_part = (float_part + random_disturb).clamp(0, 1)
+        new_case_mat_recovered = recover_case_mat_from_compact(new_bool_part, new_float_part)
+        case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_nodes=True, draw_grids=True)
+
+    # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
+    high_res = cv2.resize(((1 - grid) * 127.5).astype("u1"), (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)
+    Image.fromarray(high_res).save(output_folder / f"X_{data_idx}__HR.png")
+
+    # 生成和 case_mat 同样大小的 PNG 光栅图, 并随机加入噪声、模糊等作为 data augmentation
+    low_res_imgs = highres_to_lowres_imgs(high_res, target_h=nr_blocks_vert, target_w=nr_blocks_horiz, amount=nr_lrImgs_per_svg, shuffle=False)
+    for img_idx, img in enumerate(low_res_imgs):
+        im = Image.fromarray(img)
+        im.save(output_folder / f"X_{data_idx}_{img_idx}.png")
+
+    print(f"{data_idx} ({svg_filename.name}) 处理完毕!")
+
 
 if __name__ == "__main__":
 
-    nr_grids_per_svg = 3   # 每个 svg 文件生成的 grid 数量 (aug1: grid 的随机偏移)
-    nr_imgs_per_grid = 3   # 每个 grid 生成的图片数量 (aug2: 不同的模糊核, 噪音 etc.)
-
+    nr_lrImgs_per_svg = 3   # 每个 svg 生成的 lowRes 图片数量 (不同的模糊核, 噪音 etc.)
     nr_blocks_vert = 100
     nr_blocks_horiz = 100
     subdiv_per_block = 64
-
     svg_folder = Path("./svg/")
     output_folder = Path("./dataset/")
+
     svg_files = list(svg_folder.glob("*.svg"))
+    random.seed(0)
     svg_files = random.sample(svg_files, k=10)     # fixme: 随机抽取 k 个 svg 来测试
 
-
-    for data_idx, svg_filename in enumerate(pbar := tqdm(svg_files)):
-
-        # 读入 .svg 文件, 转为 grid
-        grid = svg_to_grid(svg_filename, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
-
-        # 对 grid 随机偏移, 作为 grid 的数据扩充
-        grid = random_shifted_grid(grid, subdiv_per_block)
-
-        # 计算 case_mat
-        case_mat = grid_to_case_mat(grid, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
-
-        # 将 case_mat 存储为 .svg
-        if visualize_case_mat := True:
-            # 注: 此时 case_mat 中无法被确定的会被标记为 no=-1,
-            # 但一会转成 Tensor 之后就丢失了这一层意味,
-            # 于是从 Tensor 恢复出的 case_mat 就不再包含 no=-1 的情形.
-            case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_nodes=True, draw_grids=True)
-
-        # 将 case_mat 转为四张量表示
-        bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
-        torch.save([bool_part, bool_mask, float_part, float_mask], output_folder / f"Y_{data_idx}.pt")
-
-        # 将四张量表示转回 case_mat, 用于验证正确性
-        if verify := True:
-            # 将 Tensor 转为 case_mat, 然后输出 .svg
-            case_mat_recovered = recover_case_mat_from_compact(bool_part, float_part)
-            case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_nodes=True, draw_grids=True)
-            # 将 Tensor 随机扰动一下, 然后再转为 case_mat, 最后输出 .svg
-            random_flip_mask = torch.rand(size=bool_mask.shape) < 0.05
-            random_disturb = torch.rand(size=float_part.shape) * 0.05
-            new_bool_part = bool_part ^ random_flip_mask
-            new_float_part = (float_part + random_disturb).clamp(0, 1)
-            new_case_mat_recovered = recover_case_mat_from_compact(new_bool_part, new_float_part)
-            case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_nodes=True, draw_grids=True)
-
-        # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
-        high_res = cv2.resize(((1 - grid) * 127.5).astype("u1"), (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)
-        Image.fromarray(high_res).save(output_folder / f"X_{data_idx}__HR.png")
-
-        # 生成和 case_mat 同样大小的 PNG 光栅图, 并随机加入噪声、模糊等作为 data augmentation
-        low_res_imgs = highres_to_lowres_imgs(high_res, target_h=nr_blocks_vert, target_w=nr_blocks_horiz, amount=nr_imgs_per_grid, shuffle=False)
-        for img_idx, img in enumerate(low_res_imgs):
-            im = Image.fromarray(img)
-            im.save(output_folder / f"X_{data_idx}_{img_idx}.png")
+    # 分 N_WORKERS 个进程来处理 svg_files
+    N_WORKERS = multiprocessing.cpu_count()
+    with multiprocessing.Pool(N_WORKERS) as pool:
+        func = functools.partial(
+            svg_to_dataset,
+            output_folder=output_folder,
+            nr_lrImgs_per_svg=nr_lrImgs_per_svg,
+            nr_blocks_vert=nr_blocks_vert,
+            nr_blocks_horiz=nr_blocks_horiz,
+            subdiv_per_block=subdiv_per_block
+        )
+        pool.starmap(func, enumerate(svg_files))
 
