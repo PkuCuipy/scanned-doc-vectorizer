@@ -3,7 +3,7 @@
 import fitz
 from PIL import Image
 
-doc = fitz.Document("data/2.pdf")
+doc = fitz.Document("../data/2.pdf")
 
 print(doc.page_count)   # PDF 总页数
 

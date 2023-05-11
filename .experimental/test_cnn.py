@@ -41,7 +41,7 @@ if __name__ == "__main__":
     try: model.load_state_dict(torch.load("./save/model.pth"))
     except Exception as e: print(e)
 
-    img1 = Image.open("data/test_2.png").convert("L")
+    img1 = Image.open("../data/test_2.png").convert("L")
     img1.show()
 
     img_mat = torch.from_numpy(np.array(img1)).unsqueeze(0).float() / 255.0

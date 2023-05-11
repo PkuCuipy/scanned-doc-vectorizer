@@ -8,7 +8,7 @@ import cv2
 from tqdm import trange
 
 # read image in greyscale mode, then binarize
-grey_img = np.array(cv2.imread("data/test_10.png", cv2.IMREAD_GRAYSCALE))
+grey_img = np.array(cv2.imread("../data/test_10.png", cv2.IMREAD_GRAYSCALE))
 bin_threshold, bin_img = cv2.threshold(grey_img, 175, 255, cv2.THRESH_BINARY_INV)   # 前景为白色 (255)
 plt.imshow(bin_img, cmap="gray")
 plt.show()

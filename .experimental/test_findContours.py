@@ -7,7 +7,7 @@ import cv2
 import svgwrite
 import matplotlib.pyplot as plt
 
-image_path = "data/test_5.png"
+image_path = "../data/test_5.png"
 output_path = "./test_5.svg"
 
 # Read image and convert to grayscale

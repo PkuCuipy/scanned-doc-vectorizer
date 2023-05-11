@@ -1,6 +1,14 @@
 # 2023-04-08(19.51.29)
 # credit: Copilot & ChatGPT
 
+"""
+如果使用命令行:
+PNG_FILENAME="test_6.png"
+convert "./${PNG_FILENAME}.png" "${PNG_FILENAME}.ppm"
+potrace "${PNG_FILENAME}.ppm" -s -o "${PNG_FILENAME}.svg"
+"""
+
+
 import subprocess
 from PIL import Image
 import io
