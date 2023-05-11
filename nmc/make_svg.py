@@ -24,13 +24,14 @@ for font_path in font_paths:
     for sub_font in fontforge.fontsInFile(str(font_path)):
         print(f"\n\n读取 {font_path}({sub_font}):")
         font = fontforge.open(f"{font_path}({sub_font})", fstypepermitted_flag := 0x1)
+        font_name = font.fontname.replace(".", "_")
 
         # ASCII 部分全都要
         font.selection.select(("ranges", None), 0, 0x7F)
         ascii_glyphs = list(font.selection.byGlyphs)
         for glyph in ascii_glyphs:
             if not glyph.foreground.isEmpty():  # 空的图就不导出为 SVG 了
-                glyph_filename = svg_output_folder / f'{font.fontname}__{glyph.encoding}__U+{glyph.unicode:04X}.svg'
+                glyph_filename = svg_output_folder / f'{font_name}__{glyph.encoding}__U+{glyph.unicode:04X}.svg'
                 glyph.export(str(glyph_filename))
         print(f"输出了 {len(ascii_glyphs)} 个 ASCII 字符")
 
@@ -41,9 +42,9 @@ for font_path in font_paths:
         else_glyphs = random.sample(else_glyphs, k=min(nr_samples, len(else_glyphs)))
         for glyph in else_glyphs:
             if not glyph.foreground.isEmpty():  # 空的图就不导出为 SVG 了
-                glyph_filename = svg_output_folder / f'{font.fontname}__{glyph.encoding}__U+{glyph.unicode:04X}.svg'
+                glyph_filename = svg_output_folder / f'{font_name}__{glyph.encoding}__U+{glyph.unicode:04X}.svg'
                 glyph.export(str(glyph_filename))
         print(f"输出了 {len(else_glyphs)} 个其他字符")
 
-        print(font.fontname, "done.")
+        print(font_name, "done.")
         font.close()
