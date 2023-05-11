@@ -16,6 +16,7 @@ import random
 import multiprocessing
 import functools
 
+
 # 传入一个 .svg 文件, 进行网格密集采样  (注: 其实我们完全不 care SVG 的矢量表示, 只是因为这玩意可以超高精度采样, 比如如果有 8K 的字符光栅图像, 那理论上也是 ok 的)
 def svg_to_grid(svg_file_path: str | Path, n_blocks_vert: int, n_blocks_horiz: int, n_subdiv: int) -> np.ndarray:
     # n_blocks: 网格边上的 [大方块] 数
@@ -60,12 +61,14 @@ def svg_to_grid(svg_file_path: str | Path, n_blocks_vert: int, n_blocks_horiz: i
     grid = -(grid - 127.5) / 127.5
     return grid
 
+
 # 以 block 为单位, 上下左右平移传入的 grid
 def random_shifted_grid(grid:np.ndarray, block_size: int, shift_x: float = None, shift_y: float = None):
     # 移动最多 0.5 个 block 即可, 因为 CNN 有平移不变性
     if shift_x is None: shift_x = np.random.uniform(-0.5, 0.5)
     if shift_y is None: shift_y = np.random.uniform(-0.5, 0.5)
     return np.roll(grid, shift=[int(shift_x * block_size), int(shift_y * block_size)], axis=(0, 1))
+
 
 # 根据 [四角正负类型] 初步映射到 Case 编号
 cornerType_2_caseNum = {
@@ -91,6 +94,7 @@ cornerType_2_caseNum = {
     (0, 1, 0, 1): 1617,
 }
 
+
 # Marching Square 的 18 种情形
 class Case:
     __slots__ = ("no", "v1", "tu", "e1", "e2", "e3", "e4", "f1", "f2", "f3", "f4")  # tu: 正结点是否构成 tunnel, 仅在 14 15 16 17 时有意义
@@ -101,10 +105,12 @@ class Case:
     def __float__(self):
         return 0.0
 
+
 # 计算二维向量的长度的平方. 参数 x 是 (N,2) 的, 返回值是 (N,) 的.
 def length_square(x: torch.Tensor) -> torch.Tensor:
     x = x.view(-1, 2)
     return (x ** 2 + 0.001).sum(dim=1)   # 加 0.001 也防止梯度 NaN
+
 
 # 给定一维数组 edge, 计算 +/- 交界处的位置 e ∈ [0, 1], 返回一个二元向量
 def calc_e(i: int, edge: np.ndarray) -> np.ndarray:
@@ -120,6 +126,7 @@ def calc_e(i: int, edge: np.ndarray) -> np.ndarray:
     elif i == 3: return np.array([1.0, e], dtype="f4")
     elif i == 4: return np.array([e, 0.0], dtype="f4")
 
+
 # 计算二维平面内 [点集 C] 到 [线段 AB] 的距离
 def dist_pts_to_seg(C: torch.Tensor, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     AB = B - A
@@ -131,6 +138,7 @@ def dist_pts_to_seg(C: torch.Tensor, A: torch.Tensor, B: torch.Tensor) -> torch.
     lenCH = torch.sqrt(length_square(CH))   # 加 0.001 也是防止梯度 NaN
     return lenCH
 
+
 # 以下两个优化函数的超参数
 class OptimCfg:
     OPT = torch.optim.SGD   # Adam 不知道为啥特别偏爱让点的坐标趋于 1, 而且收敛特别慢; SGD 奇迹般地表现不错!
@@ -138,6 +146,7 @@ class OptimCfg:
     MAX_ITER = 100
     EARLY_BRK_THR = 1e-3    # 基于 loss 的优化早停阈值
     REG_COEF = 0.03         # 让边的长度尽可能小的正则项系数
+
 
 # 优化 [点 p], 使得 [折线段 A——p——B] 拟合 [点集 points]
 def optimized_single_p(*, A, B, points: np.ndarray) -> np.ndarray:
@@ -165,6 +174,7 @@ def optimized_single_p(*, A, B, points: np.ndarray) -> np.ndarray:
         last_loss = loss
     return p.detach().clamp(0.001, 0.999).numpy()
 
+
 # 优化 [点 p1 和 p2], 使得 [折线段 A——p1——p2——B] 拟合 [点集 points]
 def optimized_p1_and_p2(*, A, B, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     A = torch.tensor(A, dtype=torch.float32)
@@ -188,9 +198,11 @@ def optimized_p1_and_p2(*, A, B, points: np.ndarray) -> tuple[np.ndarray, np.nda
         last_loss = loss
     return p1.detach().clamp(0.001, 0.999).numpy(), p2.detach().clamp(0.001, 0.999).numpy()
 
+
 # 拉普拉斯边缘提取
 def laplacian_edge_detector(mat: np.ndarray, *, laplacian_kernel=np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])) -> np.ndarray:
     return convolve2d(mat, laplacian_kernel, boundary="symm", mode="same")
+
 
 # 返回 label_mat 中 label 表征的区域对应的边界点的坐标 ∈ [0,1]×[0,1]
 def edge_points(label_mat: np.ndarray, label: int) -> np.ndarray:
@@ -199,6 +211,7 @@ def edge_points(label_mat: np.ndarray, label: int) -> np.ndarray:
     ijs = np.argwhere(edge)
     xys = ijs / (label_mat.shape[0] - 1)  # xy ∈ [0,1]×[0,1]
     return xys
+
 
 # 传入一个子矩阵的网格点, 返回对应的 case
 def block_to_case(block_grid: np.ndarray) -> Case:
@@ -349,6 +362,7 @@ def block_to_case(block_grid: np.ndarray) -> Case:
         f3 = optimized_single_p(A=e2, B=e3, points=edge_points(neg_islands, neg_islands[-1, -1]))
         return Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
 
+
 # 传入整个 Grid, 返回以 Case 为元素的二维矩阵
 def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int, subdiv_per_block: int) -> np.ndarray:
     case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
@@ -357,6 +371,7 @@ def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int
         block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
         case_mat[i, j] = block_to_case(block_grid)
     return case_mat
+
 
 # 传入 case_mat, 导出到 .svg 文件
 def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_nodes=True, draw_grids=True) -> None:
@@ -398,6 +413,7 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_nod
             dwg.add(dwg.rect(insert=(j, i), size=(1, 1), fill="none", stroke="#ddd", stroke_width="0.02"))  # 网格线
     dwg.save(pretty=True)
 
+
 # 传入 case_mat, 返回紧凑表示 (注: 相邻的共享节点不重复存储, 舍弃最后一行和最后一列. 用于 CNN 训练)
 def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     bool_part = np.zeros(shape=(*case_mat.shape, 2), dtype=bool)    # M × N × 2
@@ -437,6 +453,7 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     float_part = torch.tensor(float_part.transpose((2, 0, 1)), dtype=torch.float32) # 10 × M × N
     float_mask = torch.tensor(float_mask.transpose((2, 0, 1)), dtype=torch.bool)    # 10 × M × N
     return bool_part, bool_mask, float_part, float_mask
+
 
 # 传入紧凑表示, 返回 case_mat (少一行, 少一列, 填补为 Case=-1)
 def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Tensor) -> np.ndarray:
@@ -485,6 +502,7 @@ def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Ten
         elif no == 17: case_mat[i, j] = Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
         else: case_mat[i, j] = Case(no=-1)
     return case_mat
+
 
 # 传入 [0, 255] 高清图, 返回和 case_mat 同尺寸的, 但加了噪声和模糊的图片.
 def highres_to_lowres_imgs(imH: np.ndarray, target_h: int, target_w: int, *, amount: int = 1, shuffle: bool = False) -> list[np.ndarray]:
@@ -544,6 +562,7 @@ def highres_to_lowres_imgs(imH: np.ndarray, target_h: int, target_w: int, *, amo
         np.random.shuffle(imgs)
 
     return imgs
+
 
 # 将一个 svg 文件转为若干个 lowRes 图片 + 相应的 Tensor GT, 输出到指定文件夹
 def svg_to_dataset(data_idx: int,
