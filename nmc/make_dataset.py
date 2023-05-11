@@ -441,6 +441,7 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_nod
         elif c.no == 16: polylines.append([c.e4+ij, c.f4+ij, c.e3+ij]); polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.extend([c.f4+ij, c.f2+ij])
         elif c.no == 17: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); polylines.append([c.e3+ij, c.f3+ij, c.e2+ij]); circles.extend([c.f1+ij, c.f3+ij])
     # 绘制 svg 时要注意将 x, y 坐标反过来以适应 svg 的坐标系
+    dwg.add(dwg.rect(insert=(0, 0), size=(case_mat.shape[1], case_mat.shape[0]), fill="#fff"))      # 垫一个白底背景
     for polyline in polylines:
         points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
         dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
@@ -457,6 +458,7 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     bool_part = np.zeros(shape=(*case_mat.shape, 2), dtype=bool)    # M × N × 2
     bool_mask = np.zeros(shape=(*case_mat.shape, 2), dtype=bool)    # M × N × 2
     float_part = np.zeros(shape=(*case_mat.shape, 10), dtype="f4")  # M × N × 10
+    float_part += [0.5,0.5, 0.3,0.3, 0.3,0.7, 0.7,0.7, 0.7,0.3]     # 默认初始值
     float_mask = np.zeros(shape=(*case_mat.shape, 10), dtype=bool)  # M × N × 10
     for i, j in product(range(nr_blocks_vert), range(nr_blocks_horiz)):
         case = case_mat[i, j]
@@ -491,12 +493,10 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     float_mask = torch.tensor(float_mask.transpose((2, 0, 1)), dtype=torch.bool)    # 10 × M × N
     return bool_part, bool_mask, float_part, float_mask
 
-# 检查传入的参数是否 [全都不是 None]
-def all_is_not_None(*args) -> bool:
-    return all([x is not None for x in args])
 
 # 传入紧凑表示, 返回 case_mat (少一行, 少一列, 填补为 Case=-1)
-def recover_case_mat_from_compact(bool_part: torch.Tensor, bool_mask: torch.Tensor, float_part: torch.Tensor, float_mask: torch.Tensor) -> np.ndarray:
+def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Tensor) -> np.ndarray:
+    # 注: 除了 padding 的一行一列, 其它均不可能是 Case=-1
     nr_blocks_vert = bool_part.shape[1]
     nr_blocks_horiz = bool_part.shape[2]
     case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
@@ -504,39 +504,41 @@ def recover_case_mat_from_compact(bool_part: torch.Tensor, bool_mask: torch.Tens
     case_mat[-1, :] = Case(no=-1)
     for i, j in product(range(nr_blocks_vert - 1), range(nr_blocks_horiz - 1)):
         # 尽力获取每个信息 (注: None 可能源自 [自己/右/下/右下] 有 invalid 的, 也可能本来就是 None)
-        v1 = bool(bool_part[0, i, j]) if bool_mask[0, i, j] else None
-        v2 = bool(bool_part[0, i, j+1]) if bool_mask[0, i, j+1] else None
-        v3 = bool(bool_part[0, i+1, j+1]) if bool_mask[0, i+1, j+1] else None
-        v4 = bool(bool_part[0, i+1, j]) if bool_mask[0, i+1, j] else None
-        tu = bool(bool_part[1, i, j]) if bool_mask[1, i, j] else None
-        e1 = (0, float_part[0, i, j]) if float_mask[0, i, j] else None
-        e2 = (float_part[1, i, j+1], 1) if float_mask[1, i, j+1] else None
-        e3 = (1, float_part[0, i+1, j]) if float_mask[0, i+1, j] else None
-        e4 = (float_part[1, i, j], 0) if float_mask[1, i, j] else None
-        f1 = float_part[2:4, i, j].numpy() if float_mask[2, i, j] else None
-        f2 = float_part[4:6, i, j].numpy() if float_mask[4, i, j] else None
-        f3 = float_part[6:8, i, j].numpy() if float_mask[6, i, j] else None
-        f4 = float_part[8:10, i, j].numpy() if float_mask[8, i, j] else None
-        no = cornerType_2_caseNum.get((v1, v2, v3, v4) if tu is None else (v1, v2, v3, v4, tu), None)
+        v1 = bool(bool_part[0, i, j])
+        v2 = bool(bool_part[0, i, j+1])
+        v3 = bool(bool_part[0, i+1, j+1])
+        v4 = bool(bool_part[0, i+1, j])
+        tu = bool(bool_part[1, i, j])
+        e1 = (0, float_part[0, i, j])
+        e2 = (float_part[1, i, j+1], 1)
+        e3 = (1, float_part[0, i+1, j])
+        e4 = (float_part[1, i, j], 0)
+        f1 = float_part[2:4, i, j].numpy()
+        f2 = float_part[4:6, i, j].numpy()
+        f3 = float_part[6:8, i, j].numpy()
+        f4 = float_part[8:10, i, j].numpy()
+        no = cornerType_2_caseNum.get((v1, v2, v3, v4), None)
+        if no in [1415, 1617]:
+            no = cornerType_2_caseNum[(v1, v2, v3, v4, tu)]
         if no is None: case_mat[i, j] = Case(no=-1)
-        elif no == 0 and all_is_not_None(v1): case_mat[i, j] = Case(no=0, v1=v1)
-        elif no == 1 and all_is_not_None(v1): case_mat[i, j] = Case(no=1, v1=v1)
-        elif no == 2 and all_is_not_None(v1, e4, e1, f1): case_mat[i, j] = Case(no=2, v1=v1, e4=e4, e1=e1, f1=f1)
-        elif no == 3 and all_is_not_None(v1, e1, e2, f2): case_mat[i, j] = Case(no=3, v1=v1, e1=e1, e2=e2, f2=f2)
-        elif no == 4 and all_is_not_None(v1, e2, e3, f3): case_mat[i, j] = Case(no=4, v1=v1, e2=e2, e3=e3, f3=f3)
-        elif no == 5 and all_is_not_None(v1, e3, e4, f4): case_mat[i, j] = Case(no=5, v1=v1, e3=e3, e4=e4, f4=f4)
-        elif no == 6 and all_is_not_None(v1, e4, e1, f1): case_mat[i, j] = Case(no=6, v1=v1, e4=e4, e1=e1, f1=f1)
-        elif no == 7 and all_is_not_None(v1, e1, e2, f2): case_mat[i, j] = Case(no=7, v1=v1, e1=e1, e2=e2, f2=f2)
-        elif no == 8 and all_is_not_None(v1, e2, e3, f3): case_mat[i, j] = Case(no=8, v1=v1, e2=e2, e3=e3, f3=f3)
-        elif no == 9 and all_is_not_None(v1, e3, e4, f4): case_mat[i, j] = Case(no=9, v1=v1, e3=e3, e4=e4, f4=f4)
-        elif no == 10 and all_is_not_None(v1, e4, e2, f4, f3): case_mat[i, j] = Case(no=10, v1=v1, e4=e4, e2=e2, f4=f4, f3=f3)
-        elif no == 11 and all_is_not_None(v1, e4, e2, f1, f2): case_mat[i, j] = Case(no=11, v1=v1, e4=e4, e2=e2, f1=f1, f2=f2)
-        elif no == 12 and all_is_not_None(v1, e1, e3, f2, f3): case_mat[i, j] = Case(no=12, v1=v1, e1=e1, e3=e3, f2=f2, f3=f3)
-        elif no == 13 and all_is_not_None(v1, e1, e3, f1, f4): case_mat[i, j] = Case(no=13, v1=v1, e1=e1, e3=e3, f1=f1, f4=f4)
-        elif no == 14 and all_is_not_None(v1, e1, e2, e3, e4, f1, f3): case_mat[i, j] = Case(no=14, tu=tu, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
-        elif no == 15 and all_is_not_None(v1, e1, e2, e3, e4, f2, f4): case_mat[i, j] = Case(no=15, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
-        elif no == 16 and all_is_not_None(v1, e1, e2, e3, e4, f2, f4): case_mat[i, j] = Case(no=16, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
-        elif no == 17 and all_is_not_None(v1, e1, e2, e3, e4, f1, f3): case_mat[i, j] = Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
+        elif no == 0: case_mat[i, j] = Case(no=0, v1=v1)
+        elif no == 1: case_mat[i, j] = Case(no=1, v1=v1)
+        elif no == 2: case_mat[i, j] = Case(no=2, v1=v1, e4=e4, e1=e1, f1=f1)
+        elif no == 3: case_mat[i, j] = Case(no=3, v1=v1, e1=e1, e2=e2, f2=f2)
+        elif no == 4: case_mat[i, j] = Case(no=4, v1=v1, e2=e2, e3=e3, f3=f3)
+        elif no == 5: case_mat[i, j] = Case(no=5, v1=v1, e3=e3, e4=e4, f4=f4)
+        elif no == 6: case_mat[i, j] = Case(no=6, v1=v1, e4=e4, e1=e1, f1=f1)
+        elif no == 7: case_mat[i, j] = Case(no=7, v1=v1, e1=e1, e2=e2, f2=f2)
+        elif no == 8: case_mat[i, j] = Case(no=8, v1=v1, e2=e2, e3=e3, f3=f3)
+        elif no == 9: case_mat[i, j] = Case(no=9, v1=v1, e3=e3, e4=e4, f4=f4)
+        elif no == 10: case_mat[i, j] = Case(no=10, v1=v1, e4=e4, e2=e2, f4=f4, f3=f3)
+        elif no == 11: case_mat[i, j] = Case(no=11, v1=v1, e4=e4, e2=e2, f1=f1, f2=f2)
+        elif no == 12: case_mat[i, j] = Case(no=12, v1=v1, e1=e1, e3=e3, f2=f2, f3=f3)
+        elif no == 13: case_mat[i, j] = Case(no=13, v1=v1, e1=e1, e3=e3, f1=f1, f4=f4)
+        elif no == 14: case_mat[i, j] = Case(no=14, tu=tu, v1=v1, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
+        elif no == 15: case_mat[i, j] = Case(no=15, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
+        elif no == 16: case_mat[i, j] = Case(no=16, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
+        elif no == 17: case_mat[i, j] = Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
         else: case_mat[i, j] = Case(no=-1)
     return case_mat
 
@@ -569,6 +571,9 @@ if __name__ == "__main__":
 
         # 将 case_mat 存储为 .svg
         if visualize_case_mat := True:
+            # 注: 此时 case_mat 中无法被确定的会被标记为 no=-1,
+            # 但一会转成 Tensor 之后就丢失了这一层意味,
+            # 于是从 Tensor 恢复出的 case_mat 就不再包含 no=-1 的情形.
             case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_nodes=True, draw_grids=True)
 
         # 将 case_mat 转为四张量表示
@@ -577,11 +582,20 @@ if __name__ == "__main__":
 
         # 将四张量表示转回 case_mat, 用于验证正确性
         if verify := True:
-            case_mat_recovered = recover_case_mat_from_compact(bool_part, bool_mask, float_part, float_mask)
+            # 将 Tensor 转为 case_mat, 然后输出 .svg
+            case_mat_recovered = recover_case_mat_from_compact(bool_part, float_part)
             case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_nodes=True, draw_grids=True)
+            # 将 Tensor 随机扰动一下, 然后再转为 case_mat, 最后输出 .svg
+            random_flip_mask = torch.rand(size=bool_mask.shape) < 0.05
+            random_disturb = torch.rand(size=float_part.shape) * 0.05
+            new_bool_part = bool_part ^ random_flip_mask
+            new_float_part = (float_part + random_disturb).clamp(0, 1)
+            new_case_mat_recovered = recover_case_mat_from_compact(new_bool_part, new_float_part)
+            case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_nodes=True, draw_grids=True)
 
         # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
         high_res = cv2.resize(((1 - grid) * 127.5).astype("u1"), (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)
+        Image.fromarray(high_res).save(output_folder / f"X_{data_idx}__HR.png")
 
         # 生成和 case_mat 同样大小的 PNG 光栅图, 并随机加入噪声、模糊等作为 data augmentation
         low_res_imgs = highres_to_lowres_imgs(high_res, target_h=nr_blocks_vert, target_w=nr_blocks_horiz, amount=nr_imgs_per_grid, shuffle=False)
