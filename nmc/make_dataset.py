@@ -352,69 +352,11 @@ def block_to_case(block_grid: np.ndarray) -> Case:
 # 传入整个 Grid, 返回以 Case 为元素的二维矩阵
 def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int, subdiv_per_block: int) -> np.ndarray:
     case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
-    for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="grid -> case_mat", leave=False):
+    # for i, j in tqdm(product(range(case_mat.shape[0]), range(case_mat.shape[1])), total=case_mat.size, desc="grid -> case_mat", leave=False):
+    for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
         block_grid = grid[i * subdiv_per_block : (i + 1) * subdiv_per_block + 1, j * subdiv_per_block:(j + 1) * subdiv_per_block + 1]  # 取出当前子矩阵对应的 sub_grid
         case_mat[i, j] = block_to_case(block_grid)
     return case_mat
-
-# 传入 [0, 255] 高清图, 返回和 case_mat 同尺寸的, 但加了噪声和模糊的图片.
-def highres_to_lowres_imgs(imH: np.ndarray, target_h: int, target_w: int, *, amount: int = 1, shuffle: bool = False) -> list[np.ndarray]:
-    # 记 H = high, M = target, L = target // 2
-    HToM = lambda img: cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    LToM = lambda img: cv2.resize(img, (target_w, target_h), interpolation=cv2.cv2.INTER_LINEAR)    # 区分 HToM 和 LToM 是因为降采样最好用 AREA 方法
-    ToL = lambda img: cv2.resize(img, (target_w // 2, target_h // 2), interpolation=cv2.INTER_AREA)
-    Bin = lambda img: ((img > binarize_threshold) * 255).astype("u1")
-    EPS = 1e-5
-    ClipUint8 = lambda img: img.clip(0, 255).astype("u1")
-    SetWhite = lambda img, *, mask: np.where(mask, 255, img)
-    EdgeMask = lambda img: (abs(laplacian_edge_detector(img)) > EPS)
-    RandPepper01Mask = lambda img, *, gain: (np.random.rand(*img.shape) < broken_intensity * gain)
-    RandIntMat = lambda img, *, amp: np.random.randint(-int(amp), int(amp + 1), img.shape)
-    Blur = lambda img, *, gain: cv2.GaussianBlur(img, (0, 0), (blur_intensity * img.shape[0] / target_h * gain))
-    # 生成 amount 轮, 每轮 8 张图
-    imgs = []
-    for _ in range(amount):
-        binarize_threshold = np.clip(127 + (np.random.randn() * (30 / 2)), 0, 255)    # 95% 落入 127 ± 30. (该阈值越大, 白色越少, 黑色笔画越粗)
-        broken_intensity = np.clip(0.05 + (np.random.randn() * (0.05 / 2)), 0, 1)     # 95% 落入 0.05 ± 0.05. (边界上的点的被破坏的概率)
-        blur_intensity = np.clip(1.0 + (np.random.randn() * (0.5 / 2)), 0.1, 2.0)     # 95% 落入 1.0 ± 0.5.
-
-        # Type 0. ToM(imH): 最直白准确的降采样
-        imM = HToM(imH)
-        im0 = imM
-
-        # Type 1. ToM(ToL(imH)): 进行 [先降采样, 再上采样] 的摧残
-        imL = ToL(imM)
-        im1 = LToM(imL)
-
-        # Type 2. ToM(Bin(ToL(imM))): 进行 [先降采样, 再二值化, 再上采样] 的摧残
-        im2 = LToM(Bin(imL))
-
-        # Type 3. Bin(imM): 最直白准确的二值化
-        imMBin = Bin(imM)
-        im3 = imMBin
-
-        # Type 4. Brk(imBin): 对 imMBin [边缘随机破坏]
-        edgeMaskM = EdgeMask(imMBin)
-        imMBinBroken = SetWhite(imMBin, mask=(edgeMaskM & RandPepper01Mask(imMBin, gain=1.0)))
-        im4 = imMBinBroken
-
-        # Type 5. Blur(Brk(imBin)): 对 imMBin [边缘随机破坏] 后 [高斯模糊]
-        im5 = Blur(imMBinBroken, gain=1.0)
-
-        # Type 6. ToM(Blur(imH)): 高斯模糊后, 降采样. (这里模糊不是为了更好地降采样, 而是为了生成更为模糊的图)
-        im6 = HToM(Blur(imH, gain=1.0))
-
-        # Type 7. ToM(Blur(Disturb(imH))): 随机扰动 (Disturb) 后, 高斯模糊, 然后降采样
-        dilatedEdgeMaskH = (Blur(EdgeMask(imH).astype("f4"), gain=0.5) > EPS)
-        imHDisturb = ClipUint8(imH + dilatedEdgeMaskH * RandPepper01Mask(imH, gain=4.0) * RandIntMat(imH, amp=255))
-        im7 = HToM(Blur(imHDisturb, gain=0.5))
-
-        imgs.extend([im0, im1, im2, im3, im4, im5, im6, im7])
-
-    if shuffle:
-        np.random.shuffle(imgs)
-
-    return imgs
 
 # 传入 case_mat, 导出到 .svg 文件
 def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_nodes=True, draw_grids=True) -> None:
@@ -544,6 +486,65 @@ def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Ten
         else: case_mat[i, j] = Case(no=-1)
     return case_mat
 
+# 传入 [0, 255] 高清图, 返回和 case_mat 同尺寸的, 但加了噪声和模糊的图片.
+def highres_to_lowres_imgs(imH: np.ndarray, target_h: int, target_w: int, *, amount: int = 1, shuffle: bool = False) -> list[np.ndarray]:
+    # 记 H = high, M = target, L = target // 2
+    HToM = lambda img: cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    LToM = lambda img: cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)    # 区分 HToM 和 LToM 是因为降采样最好用 AREA 方法
+    ToL = lambda img: cv2.resize(img, (target_w // 2, target_h // 2), interpolation=cv2.INTER_AREA)
+    Bin = lambda img: ((img > binarize_threshold) * 255).astype("u1")
+    EPS = 1e-5
+    ClipUint8 = lambda img: img.clip(0, 255).astype("u1")
+    SetWhite = lambda img, *, mask: np.where(mask, 255, img)
+    EdgeMask = lambda img: (abs(laplacian_edge_detector(img)) > EPS)
+    RandPepper01Mask = lambda img, *, gain: (np.random.rand(*img.shape) < broken_intensity * gain)
+    RandIntMat = lambda img, *, amp: np.random.randint(-int(amp), int(amp + 1), img.shape)
+    Blur = lambda img, *, gain: cv2.GaussianBlur(img, (0, 0), (blur_intensity * img.shape[0] / target_h * gain))
+    # 生成 amount 轮, 每轮 8 张图
+    imgs = []
+    for _ in range(amount):
+        binarize_threshold = np.clip(127 + (np.random.randn() * (30 / 2)), 0, 255)    # 95% 落入 127 ± 30. (该阈值越大, 白色越少, 黑色笔画越粗)
+        broken_intensity = np.clip(0.05 + (np.random.randn() * (0.05 / 2)), 0, 1)     # 95% 落入 0.05 ± 0.05. (边界上的点的被破坏的概率)
+        blur_intensity = np.clip(1.0 + (np.random.randn() * (0.5 / 2)), 0.1, 2.0)     # 95% 落入 1.0 ± 0.5.
+
+        # Type 0. ToM(imH): 最直白准确的降采样
+        imM = HToM(imH)
+        im0 = imM
+
+        # Type 1. ToM(ToL(imH)): 进行 [先降采样, 再上采样] 的摧残
+        imL = ToL(imM)
+        im1 = LToM(imL)
+
+        # Type 2. ToM(Bin(ToL(imM))): 进行 [先降采样, 再二值化, 再上采样] 的摧残
+        im2 = LToM(Bin(imL))
+
+        # Type 3. Bin(imM): 最直白准确的二值化
+        imMBin = Bin(imM)
+        im3 = imMBin
+
+        # Type 4. Brk(imBin): 对 imMBin [边缘随机破坏]
+        edgeMaskM = EdgeMask(imMBin)
+        imMBinBroken = SetWhite(imMBin, mask=(edgeMaskM & RandPepper01Mask(imMBin, gain=1.0)))
+        im4 = imMBinBroken
+
+        # Type 5. Blur(Brk(imBin)): 对 imMBin [边缘随机破坏] 后 [高斯模糊]
+        im5 = Blur(imMBinBroken, gain=1.0)
+
+        # Type 6. ToM(Blur(imH)): 高斯模糊后, 降采样. (这里模糊不是为了更好地降采样, 而是为了生成更为模糊的图)
+        im6 = HToM(Blur(imH, gain=1.0))
+
+        # Type 7. ToM(Blur(Disturb(imH))): 随机扰动 (Disturb) 后, 高斯模糊, 然后降采样
+        dilatedEdgeMaskH = (Blur(EdgeMask(imH).astype("f4"), gain=0.5) > EPS)
+        imHDisturb = ClipUint8(imH + dilatedEdgeMaskH * RandPepper01Mask(imH, gain=4.0) * RandIntMat(imH, amp=255))
+        im7 = HToM(Blur(imHDisturb, gain=0.5))
+
+        imgs.extend([im0, im1, im2, im3, im4, im5, im6, im7])
+
+    if shuffle:
+        np.random.shuffle(imgs)
+
+    return imgs
+
 # 将一个 svg 文件转为若干个 lowRes 图片 + 相应的 Tensor GT, 输出到指定文件夹
 def svg_to_dataset(data_idx: int,
                    svg_filename: Path,
@@ -596,8 +597,12 @@ def svg_to_dataset(data_idx: int,
     # 生成和 case_mat 同样大小的 PNG 光栅图, 并随机加入噪声、模糊等作为 data augmentation
     low_res_imgs = highres_to_lowres_imgs(high_res, target_h=nr_blocks_vert, target_w=nr_blocks_horiz, amount=nr_lrImgs_per_svg, shuffle=False)
     for img_idx, img in enumerate(low_res_imgs):
-        im = Image.fromarray(img)
-        im.save(output_folder / f"X_{data_idx}_{img_idx}.png")
+        Image.fromarray(img).save(output_folder / f"X_{data_idx}_{img_idx}.png")
+
+    # 压缩成一个 Tensor 存储, 尺寸为 [len(low_res_imgs), nr_blocks_vert, nr_blocks_horiz]
+    imgs_packed = np.concatenate(low_res_imgs).reshape((len(low_res_imgs), nr_blocks_vert, nr_blocks_horiz))
+    to_tensor = torch.tensor(imgs_packed, dtype=torch.float32)
+    torch.save(to_tensor, output_folder / f"X_{data_idx}.pt")
 
     print(f"{data_idx} ({svg_filename.name}) 处理完毕!")
 
@@ -615,16 +620,25 @@ if __name__ == "__main__":
     random.seed(0)
     svg_files = random.sample(svg_files, k=10)     # fixme: 随机抽取 k 个 svg 来测试
 
-    # 分 N_WORKERS 个进程来处理 svg_files
-    N_WORKERS = multiprocessing.cpu_count()
-    with multiprocessing.Pool(N_WORKERS) as pool:
-        func = functools.partial(
-            svg_to_dataset,
-            output_folder=output_folder,
-            nr_lrImgs_per_svg=nr_lrImgs_per_svg,
-            nr_blocks_vert=nr_blocks_vert,
-            nr_blocks_horiz=nr_blocks_horiz,
-            subdiv_per_block=subdiv_per_block
-        )
-        pool.starmap(func, enumerate(svg_files))
+    # TODO: 程序应该输出的是一个 X_highRes_Img 和一个 Y_GT_Tensor,\
+    #       而 data 的 [加噪] 要么另起一个程序, 要么在训练过程中动态添加.
+
+    if use_mp := True:
+        # 分 N_WORKERS 个进程来处理 svg_files
+        # N_WORKERS = multiprocessing.cpu_count()
+        N_WORKERS = 8
+        with multiprocessing.Pool(N_WORKERS) as pool:
+            func = functools.partial(
+                svg_to_dataset,
+                output_folder=output_folder,
+                nr_lrImgs_per_svg=nr_lrImgs_per_svg,
+                nr_blocks_vert=nr_blocks_vert,
+                nr_blocks_horiz=nr_blocks_horiz,
+                subdiv_per_block=subdiv_per_block
+            )
+            pool.starmap(func, enumerate(svg_files))
+    else:
+        # 单线程, 方便 Debug
+        for data_idx, svg_filename in enumerate(svg_files):
+            svg_to_dataset(data_idx, svg_filename, output_folder, nr_lrImgs_per_svg, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
