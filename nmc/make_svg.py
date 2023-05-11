@@ -35,7 +35,7 @@ for font_path in font_paths:
         print(f"输出了 {len(ascii_glyphs)} 个 ASCII 字符")
 
         # 其他部分随机抽取 nr_samples 个
-        nr_samples = 10
+        nr_samples = 0
         font.selection.invert()
         else_glyphs = list(font.selection.byGlyphs)
         else_glyphs = random.sample(else_glyphs, k=min(nr_samples, len(else_glyphs)))
