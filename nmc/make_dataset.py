@@ -571,7 +571,10 @@ def svg_to_dataset(data_idx: int,
                    nr_lrImgs_per_svg: int,
                    nr_blocks_vert: int,
                    nr_blocks_horiz: int,
-                   subdiv_per_block: int
+                   subdiv_per_block: int,
+                   debug_visualize_case_mat: bool,
+                   debug_verify_tensor: bool,
+                   debug_save_lr_pngs: bool,
                    ):
 
     print(f"正在处理 {data_idx} ({svg_filename.name}) ...")
@@ -586,7 +589,7 @@ def svg_to_dataset(data_idx: int,
     case_mat = grid_to_case_mat(grid, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
 
     # 将 case_mat 存储为 .svg
-    if visualize_case_mat := True:
+    if debug_visualize_case_mat:
         # 注: 此时 case_mat 中无法被确定的会被标记为 no=-1,
         # 但一会转成 Tensor 之后就丢失了这一层意味,
         # 于是从 Tensor 恢复出的 case_mat 就不再包含 no=-1 的情形.
@@ -597,7 +600,7 @@ def svg_to_dataset(data_idx: int,
     torch.save([bool_part, bool_mask, float_part, float_mask], output_folder / f"Y_{data_idx}.pt")
 
     # 将四张量表示转回 case_mat, 用于验证正确性
-    if verify := True:
+    if debug_verify_tensor:
         # 将 Tensor 转为 case_mat, 然后输出 .svg
         case_mat_recovered = recover_case_mat_from_compact(bool_part, float_part)
         case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_nodes=True, draw_grids=True)
@@ -615,15 +618,16 @@ def svg_to_dataset(data_idx: int,
 
     # 生成和 case_mat 同样大小的 PNG 光栅图, 并随机加入噪声、模糊等作为 data augmentation
     low_res_imgs = highres_to_lowres_imgs(high_res, target_h=nr_blocks_vert, target_w=nr_blocks_horiz, amount=nr_lrImgs_per_svg, shuffle=False)
-    for img_idx, img in enumerate(low_res_imgs):
-        Image.fromarray(img).save(output_folder / f"X_{data_idx}_{img_idx}.png")
+    if debug_save_lr_pngs:
+        for img_idx, img in enumerate(low_res_imgs):
+            Image.fromarray(img).save(output_folder / f"X_{data_idx}_{img_idx}.png")
 
     # 压缩成一个 Tensor 存储, 尺寸为 [len(low_res_imgs), nr_blocks_vert, nr_blocks_horiz]
     imgs_packed = np.concatenate(low_res_imgs).reshape((len(low_res_imgs), nr_blocks_vert, nr_blocks_horiz))
     to_tensor = torch.tensor(imgs_packed, dtype=torch.float32)
     torch.save(to_tensor, output_folder / f"X_{data_idx}.pt")
 
-    print(f"{data_idx} ({svg_filename.name}) 处理完毕!")
+    print(f"✅  {data_idx} ({svg_filename.name}) 处理完毕!")
 
 
 if __name__ == "__main__":
@@ -635,12 +639,29 @@ if __name__ == "__main__":
     svg_folder = Path("./svg/")
     output_folder = Path("./dataset/")
 
-    svg_files = list(svg_folder.glob("*.svg"))
-    random.seed(0)
-    svg_files = random.sample(svg_files, k=10)     # fixme: 随机抽取 k 个 svg 来测试
+    debug_visualize_case_mat = True
+    debug_verify_tensor = True
+    debug_save_lr_pngs = True
+
+    svg_files: list[Path] = list(svg_folder.glob("*.svg"))
+    svg_files.sort(key=lambda x: str(x))
+    random.seed(1028)
+    random.shuffle(svg_files)
+    # svg_files = svg_files[:8]     # fixme: 随机抽取 k 个 svg 来测试
+
+    print(f"请确认以下参数:\n")
+    print(f" * debug_visualize_case_mat = {debug_visualize_case_mat}")
+    print(f" * debug_verify_tensor      = {debug_verify_tensor}")
+    print(f" * debug_save_lr_pngs       = {debug_save_lr_pngs}")
+    print(f" * len(svg_files)           = {len(svg_files)}")
+    if input("\n输入 y 以继续: ") != "y":
+        print("已取消!")
+        exit()
 
     # TODO: 程序应该输出的是一个 X_highRes_Img 和一个 Y_GT_Tensor,\
     #       而 data 的 [加噪] 要么另起一个程序, 要么在训练过程中动态添加.
+
+    # TODO: 32×32 的数据生成
 
     if use_mp := True:
         # 分 N_WORKERS 个进程来处理 svg_files
@@ -653,7 +674,10 @@ if __name__ == "__main__":
                 nr_lrImgs_per_svg=nr_lrImgs_per_svg,
                 nr_blocks_vert=nr_blocks_vert,
                 nr_blocks_horiz=nr_blocks_horiz,
-                subdiv_per_block=subdiv_per_block
+                subdiv_per_block=subdiv_per_block,
+                debug_visualize_case_mat=debug_visualize_case_mat,
+                debug_verify_tensor=debug_verify_tensor,
+                debug_save_lr_pngs=debug_save_lr_pngs,
             )
             pool.starmap(func, enumerate(svg_files))
     else:
