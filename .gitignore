@@ -4,3 +4,5 @@ data
 nmc/font
 nmc/svg
 nmc/dataset
+nmc/output
+nmc/model_save
