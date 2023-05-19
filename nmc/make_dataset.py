@@ -16,6 +16,7 @@ import random
 import multiprocessing
 import functools
 
+EPSILON = 1e-10
 
 # 传入一个 .svg 文件, 进行网格密集采样  (注: 其实我们完全不 care SVG 的矢量表示, 只是因为这玩意可以超高精度采样, 比如如果有 8K 的字符光栅图像, 那理论上也是 ok 的)
 def svg_to_grid(svg_file_path: str | Path, n_blocks_vert: int, n_blocks_horiz: int, n_subdiv: int) -> np.ndarray:
@@ -109,7 +110,7 @@ class Case:
 # 计算二维向量的长度的平方. 参数 x 是 (N,2) 的, 返回值是 (N,) 的.
 def length_square(x: torch.Tensor) -> torch.Tensor:
     x = x.view(-1, 2)
-    return (x ** 2 + 0.001).sum(dim=1)   # 加 0.001 也防止梯度 NaN
+    return (x ** 2 + EPSILON).sum(dim=1)   # 加 EPS 防止梯度 NaN
 
 
 # 给定一维数组 edge, 计算 +/- 交界处的位置 e ∈ [0, 1], 返回一个二元向量
@@ -132,7 +133,7 @@ def dist_pts_to_seg(C: torch.Tensor, A: torch.Tensor, B: torch.Tensor) -> torch.
     AB = B - A
     AC = C - A
     lenAB2 = length_square(AB)
-    p = ((AC @ AB) / lenAB2).view(-1, 1).clamp(0.001, 0.999).detach()  # clamp 不用 (0, 1) 是防止梯度 NaN
+    p = ((AC @ AB) / lenAB2).view(-1, 1).clamp(EPSILON, 1 - EPSILON).detach()  # clamp 不用 (0, 1) 是防止梯度 NaN
     AH = p * AB
     CH = AH - AC
     lenCH = torch.sqrt(length_square(CH))   # 加 0.001 也是防止梯度 NaN
@@ -141,11 +142,11 @@ def dist_pts_to_seg(C: torch.Tensor, A: torch.Tensor, B: torch.Tensor) -> torch.
 
 # 以下两个优化函数的超参数
 class OptimCfg:
-    OPT = torch.optim.SGD   # Adam 不知道为啥特别偏爱让点的坐标趋于 1, 而且收敛特别慢; SGD 奇迹般地表现不错!
-    LR = 0.03
-    MAX_ITER = 100
-    EARLY_BRK_THR = 1e-3    # 基于 loss 的优化早停阈值
-    REG_COEF = 0.03         # 让边的长度尽可能小的正则项系数
+    OPT = torch.optim.Adam
+    LR = 1e-3
+    MAX_ITER = 1000
+    EARLY_BRK_THR = 1e-4    # 基于 loss 的优化早停阈值
+    REG_COEF = 1e-3         # 让边的长度尽可能小的正则项系数
 
 
 # 优化 [点 p], 使得 [折线段 A——p——B] 拟合 [点集 points]
@@ -172,7 +173,7 @@ def optimized_single_p(*, A, B, points: np.ndarray) -> np.ndarray:
         if abs((last_loss - loss) / loss) < OptimCfg.EARLY_BRK_THR:
             break
         last_loss = loss
-    return p.detach().clamp(0.001, 0.999).numpy()
+    return p.detach().clamp(EPSILON, 1 - EPSILON).numpy()
 
 
 # 优化 [点 p1 和 p2], 使得 [折线段 A——p1——p2——B] 拟合 [点集 points]
@@ -196,7 +197,7 @@ def optimized_p1_and_p2(*, A, B, points: np.ndarray) -> tuple[np.ndarray, np.nda
         if abs((last_loss - loss) / loss) < OptimCfg.EARLY_BRK_THR:
             break
         last_loss = loss
-    return p1.detach().clamp(0.001, 0.999).numpy(), p2.detach().clamp(0.001, 0.999).numpy()
+    return p1.detach().clamp(EPSILON, 1 - EPSILON).numpy(), p2.detach().clamp(EPSILON, 1 - EPSILON).numpy()
 
 
 # 拉普拉斯边缘提取
@@ -638,7 +639,9 @@ if __name__ == "__main__":
     subdiv_per_block = 64
     svg_folder = Path("./svg/")
     output_folder = Path("./dataset/")
+    max_svgs = 30           # 最多抽取 svg 文件的个数 (测试用)
 
+    use_mp = True
     debug_visualize_case_mat = True
     debug_verify_tensor = True
     debug_save_lr_pngs = True
@@ -646,10 +649,14 @@ if __name__ == "__main__":
     svg_files: list[Path] = list(svg_folder.glob("*.svg"))
     svg_files.sort(key=lambda x: str(x))
     random.seed(1028)
+    np.random.seed(1028)
     random.shuffle(svg_files)
-    # svg_files = svg_files[:8]     # fixme: 随机抽取 k 个 svg 来测试
+    # svg_files = svg_files[:max_svgs]
 
     print(f"请确认以下参数:\n")
+    print(f" * use_mp                   = {use_mp}")
+    print(f" * nr_blocks_vert           = {nr_blocks_vert}")
+    print(f" * nr_blocks_horiz          = {nr_blocks_horiz}")
     print(f" * debug_visualize_case_mat = {debug_visualize_case_mat}")
     print(f" * debug_verify_tensor      = {debug_verify_tensor}")
     print(f" * debug_save_lr_pngs       = {debug_save_lr_pngs}")
@@ -663,7 +670,7 @@ if __name__ == "__main__":
 
     # TODO: 32×32 的数据生成
 
-    if use_mp := True:
+    if use_mp:
         # 分 N_WORKERS 个进程来处理 svg_files
         # N_WORKERS = multiprocessing.cpu_count()
         N_WORKERS = 8
@@ -683,5 +690,5 @@ if __name__ == "__main__":
     else:
         # 单线程, 方便 Debug
         for data_idx, svg_filename in enumerate(svg_files):
-            svg_to_dataset(data_idx, svg_filename, output_folder, nr_lrImgs_per_svg, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block)
+            svg_to_dataset(data_idx, svg_filename, output_folder, nr_lrImgs_per_svg, nr_blocks_vert, nr_blocks_horiz, subdiv_per_block, debug_visualize_case_mat, debug_verify_tensor, debug_save_lr_pngs)
 
