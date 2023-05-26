@@ -15,6 +15,7 @@ from pathlib import Path
 import random
 import multiprocessing
 import functools
+import svgwrite.path
 
 EPSILON = 1e-10
 
@@ -151,10 +152,6 @@ class OptimCfg:
 
 # 优化 [点 p], 使得 [折线段 A——p——B] 拟合 [点集 points]
 def optimized_single_p(*, A, B, points: np.ndarray) -> np.ndarray:
-    # fixme: 其实觉得这里用梯度下降法可能不是最好的方案, 因为不好控制迭代步数, 收敛偏慢. \
-    #        比如一个改进算法的 idea 是: 首先将每个点归入最近的线段,
-    #        对于归入线段 A-P 的点, 计算第一奇异向量得到一条直线 l1; 对于归入线段 P-B 的点, 计算第一奇异向量得到另一条直线 l2. \
-    #        然后求 l1 和 l2 的交点, 作为新的 P. 一直迭代下去直到收敛. 这样可能会比现在的要快. \
     A = torch.tensor(A, dtype=torch.float32)
     B = torch.tensor(B, dtype=torch.float32)
     points = torch.tensor(points, dtype=torch.float32)
@@ -374,15 +371,145 @@ def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int
     return case_mat
 
 
+# 传入 case_mat, 导出为轮廓路径 (一个列表, 列表每个元素是一个 n×2 矩阵, 表示 n 个点的封闭路径)
+def case_mat_to_closed_path(case_mat: np.ndarray) -> svgwrite.path.Path:
+    # 有向线段的右手侧对应轮廓内部
+    polylines_mat = np.zeros_like(case_mat, dtype=object)   # dtype = Polylines
+    H, W = case_mat.shape
+    # 统计每个格子的折线段信息
+    for i, j in product(range(H), range(W)):
+        case: Case = case_mat[i, j]
+        if case.no == 2: polylines_mat[i, j] = [[("e1", case.e1), ("f1", case.f1), ("e4", case.e4)]]
+        elif case.no == 3: polylines_mat[i, j] = [[("e2", case.e2), ("f2", case.f2), ("e1", case.e1)]]
+        elif case.no == 4: polylines_mat[i, j] = [[("e3", case.e3), ("f3", case.f3), ("e2", case.e2)]]
+        elif case.no == 5: polylines_mat[i, j] = [[("e4", case.e4), ("f4", case.f4), ("e3", case.e3)]]
+        elif case.no == 6: polylines_mat[i, j] = [[("e4", case.e4), ("f1", case.f1), ("e1", case.e1)]]
+        elif case.no == 7: polylines_mat[i, j] = [[("e1", case.e1), ("f2", case.f2), ("e2", case.e2)]]
+        elif case.no == 8: polylines_mat[i, j] = [[("e2", case.e2), ("f3", case.f3), ("e3", case.e3)]]
+        elif case.no == 9: polylines_mat[i, j] = [[("e3", case.e3), ("f4", case.f4), ("e4", case.e4)]]
+        elif case.no == 10: polylines_mat[i, j] = [[("e2", case.e2), ("f3", case.f3), ("f4", case.f4), ("e4", case.e4)]]
+        elif case.no == 11: polylines_mat[i, j] = [[("e4", case.e4), ("f1", case.f1), ("f2", case.f2), ("e2", case.e2)]]
+        elif case.no == 12: polylines_mat[i, j] = [[("e1", case.e1), ("f2", case.f2), ("f3", case.f3), ("e3", case.e3)]]
+        elif case.no == 13: polylines_mat[i, j] = [[("e3", case.e3), ("f4", case.f4), ("f1", case.f1), ("e1", case.e1)]]
+        elif case.no == 14: polylines_mat[i, j] = [[("e1", case.e1), ("f1", case.f1), ("e4", case.e4)], [("e3", case.e3), ("f3", case.f3), ("e2", case.e2)]]
+        elif case.no == 15: polylines_mat[i, j] = [[("e1", case.e1), ("f2", case.f2), ("e2", case.e2)], [("e3", case.e3), ("f4", case.f4), ("e4", case.e4)]]
+        elif case.no == 16: polylines_mat[i, j] = [[("e2", case.e2), ("f2", case.f2), ("e1", case.e1)], [("e4", case.e4), ("f4", case.f4), ("e3", case.e3)]]
+        elif case.no == 17: polylines_mat[i, j] = [[("e2", case.e2), ("f3", case.f3), ("e3", case.e3)], [("e4", case.e4), ("f1", case.f1), ("e1", case.e1)]]
+        else: polylines_mat[i, j] = []
+
+    # 收集全部的环路
+    loops = []
+    for i, j in product(range(H), range(W)):
+
+        # 寻找一个未被遍历过、且有折线的格子
+        polylines = polylines_mat[i, j]         # 复数, 但其实每个格子最多 2 条 polyline
+        if len(polylines) == 0:
+            continue
+        loop: list[np.ndarray] = []             # 一个封闭圆环路径的所有点
+        start_edge_type = polylines[0][0][0]    # 圆环路径起始边的名称 ∈ {"e1", "e2", "e3", "e4"}
+        cursor_i, cursor_j = i, j               # 当前搜索的格子的坐标
+        next_edge_type = start_edge_type        # 下一个折线的起点所在的边名称 ∈ {"e1", "e2", "e3", "e4"}
+
+        # 从这个格子开始, 顺时针遍历所有的折线
+        while True:
+
+            # 找到和上一个格子的折线相连的那个折线
+            for idx, polyline in enumerate(polylines_mat[cursor_i, cursor_j]):
+                if polyline[0][0] == next_edge_type:
+                    polyline = polylines_mat[cursor_i, cursor_j].pop(idx)
+                    break
+            else: raise ValueError(f"找不到相连的折线!")
+
+            # 将这个折线的点按序加入 points (最后一个点不加入, 否则两个折线会重复添加两次)
+            for named_point in polyline[:-1]:
+                loop.append(named_point[1] + [cursor_i, cursor_j])
+
+            # 决定下一个搜索的格子, 以及下一个折线的起点所在的边名称
+            endpoint_type = polyline[-1][0]
+            endpoint_pos = polyline[-1][1]
+            if endpoint_type == "e1": cursor_i -= 1; next_edge_type = "e3"
+            elif endpoint_type == "e2": cursor_j += 1; next_edge_type = "e4"
+            elif endpoint_type == "e3": cursor_i += 1; next_edge_type = "e1"
+            elif endpoint_type == "e4": cursor_j -= 1; next_edge_type = "e2"
+            else: raise ValueError(f"endpoint_type = {endpoint_type}")
+
+            # 如果撞墙了, 则沿着边缘寻找第一个进入点
+            if np.any([(hit_top := (cursor_i < 0)), (hit_bottom := (cursor_i >= H)), (hit_left := (cursor_j < 0)), (hit_right := (cursor_j >= W))]):
+
+                # 根据撞墙位置, 决定初始沿边搜索的位置和方向
+                if hit_left: moving_direction = [-1, 0]; cursor_j = 0
+                elif hit_top: moving_direction = [0, 1]; cursor_i = 0
+                elif hit_right: moving_direction = [1, 0]; cursor_j = W - 1
+                elif hit_bottom: moving_direction = [0, -1]; cursor_i = H - 1
+                else: raise
+
+                # 撞墙的位置要添加为轮廓点
+                loop.append(endpoint_pos + [cursor_i, cursor_j])
+
+                # 沿着边缘, 寻找第一个可以进入的格子
+                while True:
+
+                    # 若遇到四种撞到边角的情形, 则要转向, 并添加一个角落处的轮廓点, 且不移动; 否则, 沿着方向移动一格;
+                    if (moving_direction == [-1, 0]) and (cursor_i == 0):       # 向上移动到左上角了
+                        moving_direction = [0, 1]
+                        loop.append(np.array([0, 0]))
+                    elif (moving_direction == [0, 1]) and (cursor_j == W-1):    # 向右移动到右上角了
+                        moving_direction = [1, 0]
+                        loop.append(np.array([0, W]))
+                    elif (moving_direction == [1, 0]) and (cursor_i == H-1):    # 向下移动到右下角了
+                        moving_direction = [0, -1]
+                        loop.append(np.array([H, W]))
+                    elif (moving_direction == [0, -1]) and (cursor_j == 0):     # 向左移动到左下角了
+                        moving_direction = [-1, 0]
+                        loop.append(np.array([H, 0]))
+                    else:
+                        cursor_i += moving_direction[0]
+                        cursor_j += moving_direction[1]
+
+                    # 判断是否可以进入这个格子
+                    if (moving_direction == [-1, 0]) and (case_mat[cursor_i, cursor_j].no in {5, 6, 11, 16, 17}):     # 向上移动, 发现可以向右拐进入的地方了
+                        next_edge_type = "e4"
+                        break
+                    if (moving_direction == [0, 1]) and (case_mat[cursor_i, cursor_j].no in {2, 7, 12, 14, 15}):      # 向右移动, 发现可以向下拐进入的地方了
+                        next_edge_type = "e1"
+                        break
+                    if (moving_direction == [1, 0]) and (case_mat[cursor_i, cursor_j].no in {3, 8, 10, 16, 17}):      # 向下移动, 发现可以向左拐进入的地方了
+                        next_edge_type = "e2"
+                        break
+                    if (moving_direction == [0, -1]) and (case_mat[cursor_i, cursor_j].no in {4, 9, 13, 14, 15}):     # 向左移动, 发现可以向上拐进入的地方了
+                        next_edge_type = "e3"
+                        break
+
+            # 回到起点了, 说明这个封闭曲线已经遍历完成
+            if (cursor_i, cursor_j) == (i, j) and (next_edge_type == start_edge_type):
+                break
+
+        # 保存这个封闭曲线
+        loops.append(loop)
+
+    # 转化为 SVG <path>
+    path_cmds: list[str] = []
+    for points in loops:
+        points = np.array(points)
+        path_cmds.append("M")               # M x0,y0  L x1,y1  L x2,y2  ...  Z
+        for i, point in enumerate(points):
+            path_cmds.append(f"{point[1]},{point[0]}")
+            if i != len(points) - 1:
+                path_cmds.append("L")
+        path_cmds.append("Z")
+    path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill="black", stroke="none", opacity=1)
+
+    return path_elem
+
+
 # 传入 case_mat, 导出到 .svg 文件
-def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_nodes=True, draw_grids=True) -> None:
-    dwg = svgwrite.Drawing(filename=svg_save_path, size=("100%", "100%"), viewBox=("0 0 %d %d" % (case_mat.shape[1] + 1, case_mat.shape[0] + 1)))
+def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_edge_nodes=True, draw_face_nodes=True, draw_grids=True, fill=False, draw_stroke=True) -> None:
     polylines: list[list[np.ndarray]] = []
     circles: list[np.ndarray] = []
     for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
         c = case_mat[i, j]
         ij = np.array([i, j])
-        if c.no == -1: continue
+        if c.no == -1: assert not fill, "存在非法情形, 无法使用 fill=True 参数!"; continue
         elif c.no == 0: continue
         elif c.no == 1: continue
         elif c.no == 2: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); circles.append(c.f1+ij)
@@ -402,13 +529,20 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_nod
         elif c.no == 16: polylines.append([c.e4+ij, c.f4+ij, c.e3+ij]); polylines.append([c.e1+ij, c.f2+ij, c.e2+ij]); circles.extend([c.f4+ij, c.f2+ij])
         elif c.no == 17: polylines.append([c.e4+ij, c.f1+ij, c.e1+ij]); polylines.append([c.e3+ij, c.f3+ij, c.e2+ij]); circles.extend([c.f1+ij, c.f3+ij])
     # 绘制 svg 时要注意将 x, y 坐标反过来以适应 svg 的坐标系
+    dwg = svgwrite.Drawing(filename=svg_save_path, size=("100%", "100%"), viewBox=f"0 0 {case_mat.shape[1] + fill} {case_mat.shape[0] + fill}")
     dwg.add(dwg.rect(insert=(0, 0), size=(case_mat.shape[1], case_mat.shape[0]), fill="#fff"))      # 垫一个白底背景
+    if fill:
+        dwg.add(case_mat_to_closed_path(case_mat))
     for polyline in polylines:
         points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
-        dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
-    if draw_nodes:
-        for circle in circles:
-            dwg.add(dwg.circle(center=(float(circle[1].round(3)), float(circle[0].round(3))), r="0.05", stroke="red", fill="yellow", stroke_width="0.01"))
+        if draw_stroke:
+            dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="0.05"))
+        if draw_face_nodes:
+            for p in points[1:-1]:
+                dwg.add(dwg.circle(center=p, r="0.05", stroke="red", fill="yellow", stroke_width="0.01"))
+        if draw_edge_nodes:
+            dwg.add(dwg.circle(center=points[0], r="0.05", stroke="red", fill="yellow", stroke_width="0.01"))
+            dwg.add(dwg.circle(center=points[0], r="0.05", stroke="red", fill="yellow", stroke_width="0.01"))
     if draw_grids:
         for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
             dwg.add(dwg.rect(insert=(j, i), size=(1, 1), fill="none", stroke="#ddd", stroke_width="0.02"))  # 网格线
@@ -456,25 +590,23 @@ def case_mat_to_compact(case_mat: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     return bool_part, bool_mask, float_part, float_mask
 
 
-# 传入紧凑表示, 返回 case_mat (少一行, 少一列, 填补为 Case=-1)
+# 传入紧凑表示, 返回 case_mat
 def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Tensor) -> np.ndarray:
-    # 注: 除了 padding 的一行一列, 其它均不可能是 Case=-1
-    nr_blocks_vert = bool_part.shape[1]
-    nr_blocks_horiz = bool_part.shape[2]
+    # 注: 返回的 case_mat 的所有 case_number 都在 0~17 范围内!
+    nr_blocks_vert = bool_part.shape[1] - 1
+    nr_blocks_horiz = bool_part.shape[2] - 1
     case_mat = np.zeros(shape=(nr_blocks_vert, nr_blocks_horiz), dtype=Case)
-    case_mat[:, -1] = Case(no=-1)
-    case_mat[-1, :] = Case(no=-1)
-    for i, j in product(range(nr_blocks_vert - 1), range(nr_blocks_horiz - 1)):
+    for i, j in product(range(nr_blocks_vert), range(nr_blocks_horiz)):
         # 尽力获取每个信息 (注: None 可能源自 [自己/右/下/右下] 有 invalid 的, 也可能本来就是 None)
         v1 = bool(bool_part[0, i, j])
         v2 = bool(bool_part[0, i, j+1])
         v3 = bool(bool_part[0, i+1, j+1])
         v4 = bool(bool_part[0, i+1, j])
         tu = bool(bool_part[1, i, j])
-        e1 = (0, float_part[0, i, j])
-        e2 = (float_part[1, i, j+1], 1)
-        e3 = (1, float_part[0, i+1, j])
-        e4 = (float_part[1, i, j], 0)
+        e1 = np.array([0.0, float(float_part[0, i, j])])
+        e2 = np.array([float(float_part[1, i, j+1]), 1.0])
+        e3 = np.array([1.0, float(float_part[0, i+1, j])])
+        e4 = np.array([float(float_part[1, i, j]), 0.0])
         f1 = float_part[2:4, i, j].numpy()
         f2 = float_part[4:6, i, j].numpy()
         f3 = float_part[6:8, i, j].numpy()
@@ -482,8 +614,7 @@ def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Ten
         no = cornerType_2_caseNum.get((v1, v2, v3, v4), None)
         if no in [1415, 1617]:
             no = cornerType_2_caseNum[(v1, v2, v3, v4, tu)]
-        if no is None: case_mat[i, j] = Case(no=-1)
-        elif no == 0: case_mat[i, j] = Case(no=0, v1=v1)
+        if no == 0: case_mat[i, j] = Case(no=0, v1=v1)
         elif no == 1: case_mat[i, j] = Case(no=1, v1=v1)
         elif no == 2: case_mat[i, j] = Case(no=2, v1=v1, e4=e4, e1=e1, f1=f1)
         elif no == 3: case_mat[i, j] = Case(no=3, v1=v1, e1=e1, e2=e2, f2=f2)
@@ -501,7 +632,7 @@ def recover_case_mat_from_compact(bool_part: torch.Tensor, float_part: torch.Ten
         elif no == 15: case_mat[i, j] = Case(no=15, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
         elif no == 16: case_mat[i, j] = Case(no=16, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f2=f2, f4=f4)
         elif no == 17: case_mat[i, j] = Case(no=17, v1=v1, tu=tu, e1=e1, e2=e2, e3=e3, e4=e4, f1=f1, f3=f3)
-        else: case_mat[i, j] = Case(no=-1)
+        else: raise
     return case_mat
 
 
@@ -594,7 +725,7 @@ def svg_to_dataset(data_idx: int,
         # 注: 此时 case_mat 中无法被确定的会被标记为 no=-1,
         # 但一会转成 Tensor 之后就丢失了这一层意味,
         # 于是从 Tensor 恢复出的 case_mat 就不再包含 no=-1 的情形.
-        case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_nodes=True, draw_grids=True)
+        case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_face_nodes=True, draw_grids=True)
 
     # 将 case_mat 转为四张量表示
     bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
@@ -604,14 +735,16 @@ def svg_to_dataset(data_idx: int,
     if debug_verify_tensor:
         # 将 Tensor 转为 case_mat, 然后输出 .svg
         case_mat_recovered = recover_case_mat_from_compact(bool_part, float_part)
-        case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_nodes=True, draw_grids=True)
+        case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_face_nodes=True, draw_grids=True, fill=True)
+
         # 将 Tensor 随机扰动一下, 然后再转为 case_mat, 最后输出 .svg
         random_flip_mask = torch.rand(size=bool_mask.shape) < 0.05
         random_disturb = torch.rand(size=float_part.shape) * 0.05
         new_bool_part = bool_part ^ random_flip_mask
         new_float_part = (float_part + random_disturb).clamp(0, 1)
         new_case_mat_recovered = recover_case_mat_from_compact(new_bool_part, new_float_part)
-        case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_nodes=True, draw_grids=True)
+        case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_face_nodes=True, draw_grids=True, fill=True)
+
 
     # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
     high_res = cv2.resize(((1 - grid) * 127.5).astype("u1"), (nr_blocks_horiz * 4, nr_blocks_vert * 4), interpolation=cv2.INTER_AREA)
@@ -648,10 +781,12 @@ if __name__ == "__main__":
 
     svg_files: list[Path] = list(svg_folder.glob("*.svg"))
     svg_files.sort(key=lambda x: str(x))
-    random.seed(1028)
-    np.random.seed(1028)
+    seed = 1028
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     random.shuffle(svg_files)
-    # svg_files = svg_files[:max_svgs]
+    svg_files = svg_files[:max_svgs]
 
     print(f"请确认以下参数:\n")
     print(f" * use_mp                   = {use_mp}")
@@ -661,6 +796,7 @@ if __name__ == "__main__":
     print(f" * debug_verify_tensor      = {debug_verify_tensor}")
     print(f" * debug_save_lr_pngs       = {debug_save_lr_pngs}")
     print(f" * len(svg_files)           = {len(svg_files)}")
+
     if input("\n输入 y 以继续: ") != "y":
         print("已取消!")
         exit()
