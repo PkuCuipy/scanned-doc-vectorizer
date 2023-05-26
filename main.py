@@ -130,15 +130,16 @@ def centroids_aligned_mean(areas: Iterable[Area], upscale: int, *, canvas_h_at_l
     return np.mean(all_canvas, axis=0), (canvas_w-1) / 2, (canvas_h-1) / 2
 
 # 传入一个 area, 计算 feature_vector
-FEAT_MAT_SIZE = 30 * 4     # fixme: 超参数, 且请确保是 4 的倍数, 因为下面要用到 4x4 的低通滤波
+DOWN_SAMPLE_RATIO = 1
+GAUSSIAN_SIGMA = 1.5
+FEAT_MAT_SIZE = 60
 print("FEAT_MAT_SIZE =", FEAT_MAT_SIZE)
 def calc_feat_mat(area: Area) -> Union[np.ndarray, None]:
     feat_mat = centroids_aligned_mean([area, ], upscale=1, canvas_h_at_least_prompt=FEAT_MAT_SIZE, canvas_w_at_least_prompt=FEAT_MAT_SIZE)[0]
     if feat_mat.shape != (FEAT_MAT_SIZE, FEAT_MAT_SIZE):
         return None  # 这个 area 的尺寸很大, 认为分辨率已足够大, 无需合并超分辨率
-    feat_mat = np.mean(feat_mat.reshape((feat_mat.shape[0] // 4, 4, feat_mat.shape[1] // 4, 4)), axis=(1, 3))    # (4h, 4w) -> (h, w) 低通滤波. (cv2.resize 会导致小像素蜜汁消失, 不懂为啥, 总之弃用)
-    # feat_mat = (feat_mat ** (1/2)) / (255 ** (1/2)) * 255   # 实测这里加一个上凸函数 (开根乘十) 效果会好很多
-    feat_mat = cv2.GaussianBlur(feat_mat, (5, 5), sigmaX=0.7)    # 这个高斯模糊, 对于 test9 效果很差, 因为会导致误合并; 但对于 test14 效果很好, 因为否则很难匹配合并..
+    feat_mat = cv2.GaussianBlur(feat_mat, (0, 0), sigmaX=GAUSSIAN_SIGMA)    # 高斯模糊, 提高模糊匹配程度
+    feat_mat = np.mean(feat_mat.reshape((feat_mat.shape[0] // DOWN_SAMPLE_RATIO, DOWN_SAMPLE_RATIO, feat_mat.shape[1] // DOWN_SAMPLE_RATIO, DOWN_SAMPLE_RATIO)), axis=(1, 3))    # 低通滤波. (cv2.resize 会导致小像素蜜汁消失, 不懂为啥, 总之弃用)
     return feat_mat
 
 # 传入两个 area, 计算他们的 feature 差异度
