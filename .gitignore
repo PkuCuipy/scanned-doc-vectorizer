@@ -4,5 +4,6 @@ data
 nmc/font
 nmc/svg
 nmc/dataset
-nmc/output
-nmc/model_save
+nmc/tensorboard_logs/*
+nmc/test_images/*
+nmc/model_save/*

@@ -158,7 +158,7 @@ def test_model_on_single_image(model: torch.nn.Module, greyscale_image_path: Pat
         X = tensor.unsqueeze(dim=0).unsqueeze(dim=0).to(DEVICE) * (-1 / 255.0)  # (1, 1, H, W), ∈ [0,1], 0 为外部(背景), 1 为内部(笔画)
         Y_bool_pred, Y_float_pred = model(X)
         case_mat_recovered = recover_case_mat_from_compact((Y_bool_pred[0] > 0.5).cpu(), Y_float_pred[0].cpu())
-        case_mat_to_svg(case_mat_recovered, save_svg_filepath, draw_face_nodes=True, draw_edge_nodes=True, draw_grids=False, fill=True, draw_stroke=False)
+        case_mat_to_svg(case_mat_recovered, save_svg_filepath, draw_face_nodes=True, draw_edge_nodes=True, fill=True)
 
 
 # 测试模型在 batch 数据上给出的多个 SVG
@@ -169,7 +169,7 @@ def test_model_on_random_test_set_sample(model: torch.nn.Module, test_set_loader
         for i in range(Y_float_pred.shape[0]):
             save_svg_filepath = save_svg_folder / f"{test_data_idx}_{i}.svg"
             case_mat_recovered = recover_case_mat_from_compact((Y_bool_pred[i] > 0.5).cpu(), Y_float_pred[0].cpu())
-            case_mat_to_svg(case_mat_recovered, save_svg_filepath, draw_face_nodes=True, draw_edge_nodes=True, draw_grids=False, fill=True, draw_stroke=False)
+            case_mat_to_svg(case_mat_recovered, save_svg_filepath, draw_face_nodes=True, draw_edge_nodes=True, fill=True)
             Image.fromarray(((-test_X[i, 0]).cpu().numpy() * 255).clip(0, 255).astype("u1")).save(save_svg_filepath.with_suffix(".png"))    # fixme: 现在 X 的 range 是 [-1, 0], 这是一个 bug.
 
 

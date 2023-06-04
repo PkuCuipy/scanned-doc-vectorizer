@@ -16,6 +16,7 @@ import random
 import multiprocessing
 import functools
 import svgwrite.path
+from rdp import rdp
 
 EPSILON = 1e-10
 
@@ -372,7 +373,7 @@ def grid_to_case_mat(grid: np.ndarray, nr_blocks_vert: int, nr_blocks_horiz: int
 
 
 # 传入 case_mat, 导出为轮廓路径 (一个列表, 列表每个元素是一个 n×2 矩阵, 表示 n 个点的封闭路径)
-def case_mat_to_closed_path(case_mat: np.ndarray) -> svgwrite.path.Path:
+def case_mat_to_closed_loops(case_mat: np.ndarray) -> list[np.ndarray]:
     # 有向线段的右手侧对应轮廓内部
     polylines_mat = np.zeros_like(case_mat, dtype=object)   # dtype = Polylines
     H, W = case_mat.shape
@@ -398,7 +399,7 @@ def case_mat_to_closed_path(case_mat: np.ndarray) -> svgwrite.path.Path:
         else: polylines_mat[i, j] = []
 
     # 收集全部的环路
-    loops = []
+    loops: list[np.ndarray] = []                # list[ [N×2] ]
     for i, j in product(range(H), range(W)):
 
         # 寻找一个未被遍历过、且有折线的格子
@@ -485,8 +486,15 @@ def case_mat_to_closed_path(case_mat: np.ndarray) -> svgwrite.path.Path:
                 break
 
         # 保存这个封闭曲线
-        loops.append(loop)
+        loop_np = np.array(loop)                        # N x 2
+        loop_simplified = rdp(loop_np, epsilon=2e-2)    # 使用 Ramer-Douglas-Peucker 算法进行简化    FIXME: MAGIC NUMBER 2e-2
+        loops.append(loop_simplified)
 
+    return loops
+
+
+# 传入若干个封闭多边形路径, 转化为 SVG <path> 元素
+def loops_to_svg_path(loops: list[np.ndarray]) -> svgwrite.path.Path:
     # 转化为 SVG <path>
     path_cmds: list[str] = []
     for points in loops:
@@ -498,12 +506,11 @@ def case_mat_to_closed_path(case_mat: np.ndarray) -> svgwrite.path.Path:
                 path_cmds.append("L")
         path_cmds.append("Z")
     path_elem = svgwrite.path.Path(d=" ".join(path_cmds), fill="black", stroke="none", opacity=1)
-
     return path_elem
 
 
 # 传入 case_mat, 导出到 .svg 文件
-def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_edge_nodes=True, draw_face_nodes=True, draw_grids=True, fill=False, draw_stroke=True) -> None:
+def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_edge_nodes=False, draw_face_nodes=False, draw_stroke=False, draw_grids=False, fill=False, draw_polygon_points=False) -> None:
     polylines: list[list[np.ndarray]] = []
     circles: list[np.ndarray] = []
     for i, j in product(range(case_mat.shape[0]), range(case_mat.shape[1])):
@@ -532,7 +539,14 @@ def case_mat_to_svg(case_mat: np.ndarray, svg_save_path: str | Path, *, draw_edg
     dwg = svgwrite.Drawing(filename=svg_save_path, size=("100%", "100%"), viewBox=f"0 0 {case_mat.shape[1] + fill} {case_mat.shape[0] + fill}")
     dwg.add(dwg.rect(insert=(0, 0), size=(case_mat.shape[1], case_mat.shape[0]), fill="#fff"))      # 垫一个白底背景
     if fill:
-        dwg.add(case_mat_to_closed_path(case_mat))
+        closed_loops = case_mat_to_closed_loops(case_mat)
+        path_elem = loops_to_svg_path(closed_loops)
+        dwg.add(path_elem)
+        if draw_polygon_points:
+            for points in closed_loops:
+                for p in points:
+                    dwg.add(dwg.circle(center=(p[1], p[0]), r="0.25", stroke="purple", fill="#aaa", stroke_width="0.05"))
+
     for polyline in polylines:
         points = [(float(p[1].round(3)), float(p[0].round(3))) for p in polyline]
         if draw_stroke:
@@ -725,7 +739,7 @@ def svg_to_dataset(data_idx: int,
         # 注: 此时 case_mat 中无法被确定的会被标记为 no=-1,
         # 但一会转成 Tensor 之后就丢失了这一层意味,
         # 于是从 Tensor 恢复出的 case_mat 就不再包含 no=-1 的情形.
-        case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_face_nodes=True, draw_grids=True)
+        case_mat_to_svg(case_mat, output_folder / f"NMC_{data_idx}.svg", draw_face_nodes=True, draw_grids=True, draw_stroke=True)
 
     # 将 case_mat 转为四张量表示
     bool_part, bool_mask, float_part, float_mask = case_mat_to_compact(case_mat)
@@ -735,7 +749,8 @@ def svg_to_dataset(data_idx: int,
     if debug_verify_tensor:
         # 将 Tensor 转为 case_mat, 然后输出 .svg
         case_mat_recovered = recover_case_mat_from_compact(bool_part, float_part)
-        case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_face_nodes=True, draw_grids=True, fill=True)
+        case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify.svg", draw_edge_nodes=True, draw_face_nodes=True, draw_grids=True, draw_stroke=True, fill=True)
+        case_mat_to_svg(case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_only_fill.svg", fill=True, draw_polygon_points=True)
 
         # 将 Tensor 随机扰动一下, 然后再转为 case_mat, 最后输出 .svg
         random_flip_mask = torch.rand(size=bool_mask.shape) < 0.05
@@ -743,7 +758,7 @@ def svg_to_dataset(data_idx: int,
         new_bool_part = bool_part ^ random_flip_mask
         new_float_part = (float_part + random_disturb).clamp(0, 1)
         new_case_mat_recovered = recover_case_mat_from_compact(new_bool_part, new_float_part)
-        case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_face_nodes=True, draw_grids=True, fill=True)
+        case_mat_to_svg(new_case_mat_recovered, output_folder / f"NMC_{data_idx}_verify_disturbed.svg", draw_edge_nodes=True, draw_face_nodes=True, draw_grids=True, draw_stroke=True, fill=True)
 
 
     # 将 grid ∈ [-1, 1] 转化为略低清晰度的 high_res ∈ [0, 255], 提高运行效率
@@ -777,7 +792,7 @@ if __name__ == "__main__":
     use_mp = True
     debug_visualize_case_mat = True
     debug_verify_tensor = True
-    debug_save_lr_pngs = True
+    debug_save_lr_pngs = False
 
     svg_files: list[Path] = list(svg_folder.glob("*.svg"))
     svg_files.sort(key=lambda x: str(x))
@@ -809,7 +824,7 @@ if __name__ == "__main__":
     if use_mp:
         # 分 N_WORKERS 个进程来处理 svg_files
         # N_WORKERS = multiprocessing.cpu_count()
-        N_WORKERS = 8
+        N_WORKERS = 6
         with multiprocessing.Pool(N_WORKERS) as pool:
             func = functools.partial(
                 svg_to_dataset,
